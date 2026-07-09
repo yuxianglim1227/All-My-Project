@@ -1,203 +1,224 @@
 # Baby Tracker
 
-A self-hosted baby tracker: feeding, naps, diapers, meals, growth, daily
-routine, weekly meal plan, and a prep checklist — shared live across every
-caregiver's phone.
+A baby tracker — feeding, naps, diapers, meals, growth, daily routine, weekly
+meal plan, prep checklist — shared live between caregivers.
 
-No Claude, no artifact runtime, no build step required to run it. It's a
-plain FastAPI + SQLite backend (same pattern as your MT5 dashboard) serving
-a vanilla HTML/CSS/JS frontend. One process, one port.
+**There is no server.** This is a static HTML/CSS/JS app (a PWA) that reads
+and writes its data directly to either **GitHub** or **Google Drive**, using
+your own account as the database. Open the same file from two phones and
+you have "family sharing" — no backend to run, patch, or pay for.
 
 ```
 babytracker/
-├── backend/            FastAPI + SQLite API, serves the frontend too
-│   ├── app.py
-│   ├── requirements.txt
-│   └── .env.example
-├── frontend/            Static PWA (installable on any phone, no app store)
-│   ├── index.html / styles.css / app.js / config.js
-│   ├── manifest.json / service-worker.js
-│   └── icons/
-├── mobile-wrapper/      Capacitor project — wraps the frontend into a real .apk
-│   ├── package.json / capacitor.config.json
-│   ├── www/             (copy of frontend, pre-pointed at your server)
-│   └── android/         native Android project, ready to open in Android Studio
-└── README.md            (this file)
+├── frontend/                 The whole app — this is what you host/open
+│   ├── index.html / styles.css / app.js
+│   ├── storage.js            Picks a backend, generic read-modify-write + retry
+│   ├── storage-github.js     Talks to the GitHub Contents API
+│   ├── storage-drive.js      Talks to the Google Drive API (GIS auth)
+│   ├── config.js             Your Google OAuth Client ID goes here (optional)
+│   ├── manifest.json / service-worker.js / icons/
+├── mobile-wrapper/           Capacitor project — packages frontend/ as a real .apk
+│   └── android/              (see the GitHub-only note below)
+├── backend/                  OPTIONAL — a self-hosted FastAPI+SQLite alternative,
+│                             kept for anyone who'd rather run their own server
+│                             instead of GitHub/Drive. Not needed for the setup
+│                             below.
+└── README.md
 ```
 
 ---
 
-## 0. Get it into your own GitHub
+## Which data store should you pick?
 
-This project is already a git repo (with a `.gitignore` that keeps secrets,
-`venv/`, `node_modules/`, and the SQLite data file out of version control).
-Push it to a new repo under your account:
+|                          | GitHub                                   | Google Drive |
+|---|---|---|
+| Setup effort             | 5 minutes                                | ~15 minutes (Cloud Console project) |
+| Sharing model            | One access token, used by both phones    | Each caregiver signs in with their own Google account |
+| Works inside the packaged APK | ✅ Yes                               | ⚠️ No — Google's sign-in needs a real https:// origin; use the PWA (below) instead |
+| What it looks like under the hood | A JSON file, one git commit per change | A JSON file in Drive |
 
+If you want the APK, use GitHub. If you're fine using the installed-PWA
+route (no APK), either works — Drive means each caregiver keeps their own
+Google login instead of sharing a token.
+
+---
+
+## Option A — GitHub
+
+### 1. Create a repo for the data
+A **private** repo, separate from your app code is the cleanest option —
+e.g. `baby-tracker-data`. Just needs to exist; the app creates the JSON file
+inside it automatically on first connect.
+
+### 2. Create a Personal Access Token
+GitHub → Settings → Developer settings → **Personal access tokens →
+Fine-grained tokens** → Generate new token.
+- **Repository access:** "Only select repositories" → pick the one repo above.
+- **Permissions:** Repository permissions → **Contents: Read and write**. Nothing else.
+- Set an expiration you're comfortable with (you'll generate a new one and
+  re-enter it on each device when it expires).
+
+Copy the token now — GitHub only shows it once.
+
+### 3. Connect the app
+Open the app → **GitHub** → enter:
+- Repo owner (your GitHub username)
+- Repo name (`baby-tracker-data`)
+- File path (default `baby-tracker-data.json` is fine)
+- The token you just created
+
+Hit Connect. Do this on the second phone too, with the same three fields —
+either the same token, or a second fine-grained token scoped to the same repo.
+
+**What happens to the data:** every logged entry is a real git commit. You
+can look at the full history in the GitHub UI at any time. Expect the
+commit count to climb quickly (every feed/nap/diaper is one commit) — that's
+harmless, GitHub repos handle this fine, but don't be surprised by it.
+
+---
+
+## Option B — Google Drive
+
+This needs a one-time Google Cloud Console setup, done by whichever
+caregiver is setting this up first.
+
+### 1. Create a Google Cloud project
+[console.cloud.google.com](https://console.cloud.google.com) → create a new
+project (any name).
+
+### 2. Configure the OAuth consent screen
+APIs & Services → OAuth consent screen.
+- User type: **External**.
+- Fill in the required app name / support email fields.
+- **Publishing status: leave it on "Testing"** — this is what makes this
+  free and instant instead of needing Google's app-review process.
+- Under **Test users**, add both caregivers' Google account emails. Only
+  these accounts will be able to sign in.
+
+### 3. Enable the Drive API
+APIs & Services → Library → search "Google Drive API" → Enable.
+
+### 4. Create an OAuth Client ID
+APIs & Services → Credentials → Create Credentials → **OAuth client ID**.
+- Application type: **Web application**.
+- **Authorized JavaScript origins:** the exact URL you'll open this app
+  from (e.g. `https://you.github.io/baby-tracker` if using GitHub Pages
+  below, or `http://localhost:8080` while testing locally).
+
+Copy the **Client ID** (not the secret — none is needed).
+
+### 5. Add it to the app
+Open `frontend/config.js` and set:
+```js
+window.CONFIG = { GOOGLE_CLIENT_ID: "xxxxx.apps.googleusercontent.com" };
+```
+This value is public by design (it's restricted by the origins you set
+above, not by secrecy) — fine to commit.
+
+### 6. Connect
+Open the app → **Google Drive** → Sign in. First caregiver: choose
+**"Create it."** This creates `Baby Tracker Data.json` in their Drive.
+
+### 7. Invite the second caregiver
+In the app's **Family** tab, enter their email under "Share with another
+caregiver" and tap Invite (this uses Drive's sharing API directly — no need
+to leave the app). They then open the app, choose Google Drive, sign in
+with that email, and the shared file is found automatically.
+
+**Note on permissions:** this uses the broad `drive` scope (not the
+narrower `drive.file`) specifically so a second Google account can access a
+file it didn't create, without needing Google's file-picker widget. Since
+the app stays in "Testing" mode, Google shows the sign-in only to the test
+users you listed — nobody else can use it, verified or not.
+
+---
+
+## Hosting the app
+
+It's static files — anything that serves plain HTML works. Since the code
+already lives in GitHub, **GitHub Pages** is the natural choice and needs
+no extra hosting account:
+
+1. Push this repo to GitHub (see below if you haven't yet).
+2. Repo → Settings → Pages → Source: **Deploy from a branch** → branch
+   `main`, folder `/frontend`.
+3. Your app is live at `https://<you>.github.io/<repo>/`.
+
+If you're using Google Drive, make sure that exact URL is in "Authorized
+JavaScript origins" (step 4 above) — GitHub Pages URLs are stable once set.
+
+### Pushing this repo to GitHub
 ```bash
-# from inside the babytracker/ folder
 git remote add origin https://github.com/<you>/baby-tracker.git
 git branch -M main
 git push -u origin main
 ```
-
-(Create the empty repo first at github.com/new, or with `gh repo create
-baby-tracker --private --source=. --push` if you have the GitHub CLI.)
-
-The initial commit was made under a placeholder identity — fix that once,
-if you care about commit authorship:
-```bash
-git commit --amend --reset-author -m "Initial commit"
-```
-
-**Deploying from GitHub to your AWS Windows Server** — pull instead of
-copying files by hand:
-```powershell
-cd C:\
-git clone https://github.com/<you>/baby-tracker.git babytracker
-cd babytracker\backend
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
-copy .env.example .env
-notepad .env
-```
-From then on, updates are just:
-```powershell
-cd C:\babytracker
-git pull
-venv\Scripts\pip install -r backend\requirements.txt   # if deps changed
-# restart the uvicorn/NSSM service
-```
-
-**Want it to redeploy automatically on every push?** That's a GitHub
-Actions job with a self-hosted runner installed on the Windows server (so
-Actions can reach into your private AWS instance) — happy to set that
-workflow file up if you want it; it needs a couple of specifics from your
-setup (service name, runner install path) so I didn't want to guess at it.
+(Create the empty repo first at github.com/new.)
 
 ---
 
-## 1. Run the backend
+## Installing it on a phone (PWA — works today, no app store)
 
-Works on your AWS Windows Server exactly like your MT5 dashboard does.
+1. Open the hosted URL in Chrome (Android) or Safari (iPhone).
+2. Android: menu → **"Add to Home screen."** iPhone: Share sheet →
+   **"Add to Home Screen."**
+3. It now behaves like a real app — its own icon, full-screen.
 
-```powershell
-cd backend
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-
-copy .env.example .env
-notepad .env          # set ACCESS_CODE and DB_PATH
-
-venv\Scripts\uvicorn.exe app:app --host 0.0.0.0 --port 8000
-```
-
-Visit `http://<server-ip>:8000` — you should see the app immediately. That
-same URL is now the "installable app" you'll open from any phone.
-
-**Keep it running as a Windows service** (so it survives reboots), the same
-way you'd run any other always-on Python service:
-- Easiest: [NSSM](https://nssm.cc/) — `nssm install BabyTracker "C:\path\to\venv\Scripts\uvicorn.exe" "app:app --host 0.0.0.0 --port 8000"` with the working directory set to `backend\`.
-- Alternative: Task Scheduler, running at startup, "run whether user is logged on or not."
-
-**Networking:**
-- Open port 8000 (or whichever you choose) in the Windows Firewall and your AWS security group.
-- Put it behind HTTPS if it's reachable from the open internet — either an IIS reverse proxy with a cert, or a small reverse proxy like Caddy in front of uvicorn. Browsers and Android both get stricter about installing PWAs and calling APIs over plain HTTP once it's not `localhost`.
-- If this only ever needs to be reachable from home Wi-Fi, a plain `http://<lan-ip>:8000` is fine and simpler — skip HTTPS.
-
-**Access code:** Set `ACCESS_CODE` in `.env` to anything — it's a shared
-passcode every device enters once (stored on-device after that). Leave it
-blank only if the server is not reachable from the internet at all.
-
-The SQLite file (`babytracker.db`) is the entire database. Back it up by
-copying that one file.
+Do this on both caregivers' phones. Each device stores its own connection
+info (token, or Drive sign-in) in that browser's local storage — nothing is
+shared between devices except through GitHub/Drive itself.
 
 ---
 
-## 2. Use it as an installed app (PWA) — no APK needed
+## Building a real APK (GitHub-backed only — see table above)
 
-This is the fastest path and works today on both Android and iPhone:
+`mobile-wrapper/` already has a Capacitor/Android project pointed at this
+frontend. Building the actual `.apk` needs the Android SDK, which has to
+run on your own machine (Google's SDK servers aren't reachable from where
+this was built):
 
-1. Open `http://<server-ip>:8000` in Chrome (Android) or Safari (iPhone).
-2. Enter the access code once if you set one.
-3. Android: menu → **"Add to Home screen" / "Install app."** iPhone: Share
-   sheet → **"Add to Home Screen."**
-4. It now behaves like a real app — its own icon, full-screen, works
-   offline for the interface (data still needs the network).
-
-Do this on both parents' phones, pointing at the same server address — that
-*is* the second-caregiver mode. There's no separate toggle: same server,
-same data, live.
-
----
-
-## 3. Build a real APK (optional)
-
-For a proper installable `.apk` instead of a PWA, this repo already includes
-a ready-to-open Capacitor/Android project in `mobile-wrapper/`. The web code
-is done — what's left is a native Android build, which needs the Android
-SDK and Gradle. That toolchain is large (a few GB) and needs Google's
-servers, so it has to be built on your own machine — it can't be produced
-inside this chat.
-
-**One-time setup on your machine:**
-1. Install [Android Studio](https://developer.android.com/studio) (includes the Android SDK).
-2. Install [Node.js](https://nodejs.org).
-
-**Point the app at your server:**
-1. Open `mobile-wrapper/www/config.js`.
-2. Replace the placeholder with your real address, e.g.:
-   ```js
-   window.CONFIG = { API_BASE: "https://babytracker.yourdomain.com" };
-   ```
-   (Use `https://`, not `http://`, if the server has a cert — Android
-   blocks plain HTTP to non-local addresses by default. If you must use
-   HTTP, allow cleartext traffic in `android/app/src/main/AndroidManifest.xml`.)
-
-**Build:**
 ```bash
 cd mobile-wrapper
 npm install
 npx cap sync android
 npx cap open android      # opens Android Studio
 ```
-In Android Studio: **Build → Generate Signed App Bundle / APK** → choose
-APK → create or reuse a signing key → build. The finished `.apk` lands in
-`android/app/release/` (or `/debug/` for an unsigned test build). Copy that
-file to a phone and install it (enable "install unknown apps" for whichever
-app you send it through — Drive, email, etc.).
+Build → Generate Signed App Bundle / APK. The result lands in
+`android/app/release/` (or `/debug/`). Install it on a phone and enter your
+GitHub token on first launch, same as the PWA.
 
-Rebuilding after a frontend change: edit `frontend/`, copy it over
-`mobile-wrapper/www/` again (keeping `mobile-wrapper/www/config.js`'s
-server address), then repeat `npx cap sync android` and rebuild in Android
-Studio.
-
-*If you'd rather skip Android Studio entirely, the command-line route is
-`cd android && ./gradlew assembleDebug` (`gradlew.bat` on Windows) once the
-Android SDK is installed and `ANDROID_HOME` is set — Android Studio just
-does this for you with a UI.*
+If you change `frontend/`, copy it into `mobile-wrapper/www/` again and
+re-run `npx cap sync android` before rebuilding.
 
 ---
 
-## How the data model works
+## Security notes
 
-- Every phone (browser tab, PWA, or APK) talks to the **same backend URL**,
-  so there is one shared SQLite database — that's the whole sharing model.
-  No local/shared toggle, no conflict resolution to think about.
-- Each device remembers its own **caregiver name** (Family tab) and stamps
-  new entries with it ("by Mum", "by Dad") — this is stored locally per
-  device, not in the shared database.
-- The app polls the server every ~8 seconds, so an entry logged on one
-  phone shows up on the other within a few seconds.
-- Deleting an entry is immediate and permanent — there's no undo, so the
-  app doesn't prompt twice; make sure that's the behavior you want, or ask
-  if you'd like a confirmation step added.
+- **GitHub token:** scope it to exactly one repo, Contents read/write only.
+  It's stored in each device's local storage, never committed anywhere. If
+  a device is lost, revoke that token on GitHub and issue a new one.
+- **Google Drive:** access tokens are short-lived (~1 hour) and live only in
+  memory, not storage — you'll occasionally need to tap "Reconnect" if the
+  app's been idle. Revoke access anytime at
+  [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+- Both backends mean your baby's data lives in an account you already
+  control — no third-party server in between.
+
+## Conflict handling
+
+- **GitHub:** real optimistic concurrency — each save checks the file's
+  current version and retries automatically if another device saved a
+  half-second earlier.
+- **Google Drive:** best-effort — the app always reads the latest version
+  immediately before writing, which makes true collisions rare, but there's
+  no hard version check the way GitHub has one. If both caregivers save in
+  the exact same instant, the later write wins.
 
 ## Extending it
 
-Everything is plain Python (`backend/app.py`) and vanilla JS
-(`frontend/app.js`) — no build step, no framework version to keep in sync.
-Add a table + a couple of endpoints in `app.py`, then a render function +
-a couple of `fetch` calls in `app.js`. Natural next additions: medicine/
-temperature logging, pumping sessions, splitting night sleep from day naps,
-push notifications instead of polling, multi-baby support.
+Everything is plain JS — `app.js` for UI/rendering, `storage-github.js` /
+`storage-drive.js` for the two backends. Add a field to `storage.js`'s
+`DEFAULT_STATE`, then a render function + a couple of `withMutation(...)`
+calls in `app.js`. Natural next additions: medicine/temperature logging,
+pumping sessions, splitting night sleep from naps, a third backend (e.g.
+Dropbox) by writing one more file matching the `readRaw/writeRaw` shape.

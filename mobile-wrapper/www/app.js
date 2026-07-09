@@ -45,44 +45,17 @@ function escapeHtml(s) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
-
-/* ─────────────────────────── Connection setup ─────────────────────────── */
-
-let API_BASE = "";
-
-function resolveApiBase() {
-  if (window.CONFIG && window.CONFIG.API_BASE) return window.CONFIG.API_BASE;
-  if (location.protocol === "http:" || location.protocol === "https:") return "";
-  return localStorage.getItem("serverBase") || null;
-}
-
-function isPackagedShell() {
-  return !(location.protocol === "http:" || location.protocol === "https:") &&
-    !(window.CONFIG && window.CONFIG.API_BASE);
-}
-
-async function apiFetch(path, opts = {}) {
-  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
-  const code = localStorage.getItem("accessCode");
-  if (code) headers["X-Access-Code"] = code;
-  const res = await fetch(API_BASE + path, Object.assign({}, opts, { headers }));
-  if (res.status === 401) {
-    const err = new Error("unauthorized");
-    err.code = 401;
-    throw err;
-  }
-  if (!res.ok) {
-    const err = new Error("request failed: " + res.status);
-    err.code = res.status;
-    throw err;
-  }
-  const ct = res.headers.get("content-type") || "";
-  return ct.includes("application/json") ? res.json() : null;
+function extractDriveFileId(input) {
+  input = (input || "").trim();
+  let m = input.match(/\/d\/([-\w]+)/); if (m) return m[1];
+  m = input.match(/[?&]id=([-\w]+)/); if (m) return m[1];
+  if (/^[-\w]{10,}$/.test(input)) return input;
+  return null;
 }
 
 /* ─────────────────────────── App state ─────────────────────────── */
 
-let data = null;          // server state blob
+let data = null;
 let now = new Date();
 let tab = "today";
 let histFilter = "all";
@@ -95,70 +68,30 @@ const caregiverName = () => localStorage.getItem("caregiverName") || "";
 /* ─────────────────────────── Boot sequence ─────────────────────────── */
 
 async function boot() {
-  API_BASE = resolveApiBase();
-
-  if (API_BASE === null) {
-    showServerGate();
-    return;
-  }
-
-  await tryConnect();
-}
-
-async function tryConnect() {
-  try {
-    await apiFetch("/api/health");
-  } catch (e) {
-    if (isPackagedShell()) {
-      showServerGate("Couldn't reach that address.");
+  if (Storage.isConfigured()) {
+    try {
+      Storage.activate();
+      data = await Storage.load();
+      onConnected();
       return;
+    } catch (e) {
+      console.error(e);
     }
   }
-  try {
-    data = await apiFetch("/api/state");
-    onConnected();
-  } catch (e) {
-    if (e.code === 401) {
-      showAccessGate();
-    } else {
-      // Same-origin server unreachable — nothing more we can do here.
-      document.getElementById("gate-error")?.classList.remove("hidden");
-      showAccessGate("Can't reach the server. Check it's running.");
-    }
-  }
+  showSetup("step-choose");
 }
 
-function showServerGate(message) {
-  document.getElementById("serverGate").classList.remove("hidden");
+function showSetup(stepId) {
+  document.getElementById("setupOverlay").classList.remove("hidden");
   document.getElementById("app").classList.add("hidden");
-  document.getElementById("gate").classList.add("hidden");
-  if (message) {
-    const el = document.getElementById("server-error");
-    el.textContent = message;
-    el.classList.remove("hidden");
-  }
-  const saved = localStorage.getItem("serverBase");
-  if (saved) document.getElementById("server-input").value = saved;
-}
-
-function showAccessGate(message) {
-  document.getElementById("gate").classList.remove("hidden");
-  document.getElementById("app").classList.add("hidden");
-  document.getElementById("serverGate").classList.add("hidden");
-  if (message) {
-    const el = document.getElementById("gate-error");
-    el.textContent = message;
-    el.classList.remove("hidden");
-  }
+  document.querySelectorAll("#setupOverlay .gate-card").forEach((el) => el.classList.add("hidden"));
+  document.getElementById(stepId).classList.remove("hidden");
 }
 
 function onConnected() {
-  document.getElementById("gate").classList.add("hidden");
-  document.getElementById("serverGate").classList.add("hidden");
+  document.getElementById("setupOverlay").classList.add("hidden");
   document.getElementById("app").classList.remove("hidden");
-  if (isPackagedShell() || (window.CONFIG && window.CONFIG.API_BASE)) {
-    document.getElementById("syncBadge").classList.remove("hidden");
-  }
+  document.getElementById("syncBadge").classList.remove("hidden");
   renderAll();
   startTimers();
 }
@@ -169,43 +102,152 @@ function startTimers() {
   clockTimer = setInterval(() => { now = new Date(); renderAll(); }, 30000);
   pollTimer = setInterval(async () => {
     try {
-      data = await apiFetch("/api/state");
-      renderAll();
+      const fresh = await Storage.load();
+      if (JSON.stringify(fresh) !== JSON.stringify(data)) {
+        data = fresh;
+        renderAll();
+      }
+      hideReconnectBanner();
     } catch (e) {
-      /* transient network hiccup — next poll will retry */
+      if (e.needsSignIn) showReconnectBanner();
     }
-  }, 8000);
+  }, 15000);
 }
 
-async function reloadState() {
-  data = await apiFetch("/api/state");
-  renderAll();
+async function withMutation(mutatorFn) {
+  try {
+    data = await Storage.mutate(mutatorFn);
+    renderAll();
+    hideReconnectBanner();
+  } catch (e) {
+    if (e.needsSignIn) {
+      showReconnectBanner();
+    } else {
+      console.error(e);
+      alert(e.message || "Couldn't save that — check your connection.");
+    }
+  }
 }
 
-/* ─────────────────────────── Gate wiring ─────────────────────────── */
+function showReconnectBanner() { document.getElementById("reconnectBanner").classList.remove("hidden"); }
+function hideReconnectBanner() { document.getElementById("reconnectBanner").classList.add("hidden"); }
+document.getElementById("reconnectBtn").addEventListener("click", async () => {
+  try {
+    await DriveBackend.signIn();
+    hideReconnectBanner();
+    data = await Storage.load();
+    renderAll();
+  } catch (e) {
+    alert("Couldn't reconnect: " + (e.message || e));
+  }
+});
 
-document.getElementById("gate-submit").addEventListener("click", async () => {
-  const val = document.getElementById("gate-input").value.trim();
-  localStorage.setItem("accessCode", val);
-  document.getElementById("gate-error").classList.add("hidden");
-  await tryConnect();
-});
-document.getElementById("gate-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("gate-submit").click();
+/* ─────────────────────────── Setup flow wiring ─────────────────────────── */
+
+document.getElementById("chooseGithub").addEventListener("click", () => showSetup("step-github"));
+document.getElementById("ghBack").addEventListener("click", () => showSetup("step-choose"));
+
+document.getElementById("ghConnectBtn").addEventListener("click", async () => {
+  const owner = document.getElementById("ghOwner").value.trim();
+  const repo = document.getElementById("ghRepo").value.trim();
+  const path = document.getElementById("ghPath").value.trim() || "baby-tracker-data.json";
+  const token = document.getElementById("ghToken").value.trim();
+  const errEl = document.getElementById("ghError");
+  errEl.classList.add("hidden");
+  if (!owner || !repo || !token) {
+    errEl.textContent = "Fill in owner, repo, and token.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  showSetup("step-loading");
+  try {
+    const cfg = { type: "github", owner, repo, path, token };
+    const backend = window.GitHubBackend.create(cfg);
+    await backend.testConnection();
+    Storage.setConfig(cfg);
+    Storage.activate();
+    await Storage.ensureInitialized();
+    data = await Storage.load();
+    onConnected();
+  } catch (e) {
+    showSetup("step-github");
+    errEl.textContent = e.message || "Couldn't connect.";
+    errEl.classList.remove("hidden");
+  }
 });
 
-document.getElementById("server-submit").addEventListener("click", async () => {
-  let val = document.getElementById("server-input").value.trim();
-  if (!val) return;
-  val = val.replace(/\/+$/, "");
-  localStorage.setItem("serverBase", val);
-  API_BASE = val;
-  document.getElementById("server-error").classList.add("hidden");
-  await tryConnect();
+document.getElementById("chooseDrive").addEventListener("click", () => showSetup("step-drive"));
+document.getElementById("driveBack").addEventListener("click", () => showSetup("step-choose"));
+
+document.getElementById("driveSignInBtn").addEventListener("click", async () => {
+  const errEl = document.getElementById("driveError");
+  errEl.classList.add("hidden");
+  try {
+    await DriveBackend.signIn();
+    showSetup("step-loading");
+    const found = await DriveBackend.findSharedFile();
+    if (found) {
+      window._foundDriveFile = found;
+      document.getElementById("driveFoundSub").textContent =
+        `Shared by ${found.owners?.[0]?.displayName || found.owners?.[0]?.emailAddress || "someone"} — "${found.name}"`;
+      showSetup("step-drive-found");
+    } else {
+      showSetup("step-drive-choice");
+    }
+  } catch (e) {
+    showSetup("step-drive");
+    errEl.textContent = e.message || "Sign-in didn't complete.";
+    errEl.classList.remove("hidden");
+  }
 });
-document.getElementById("server-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("server-submit").click();
+
+document.getElementById("driveUseFoundBtn").addEventListener("click", async () => {
+  const fileId = window._foundDriveFile.id;
+  showSetup("step-loading");
+  await finishDriveSetup(fileId);
 });
+document.getElementById("driveNotThisOne").addEventListener("click", () => showSetup("step-drive-choice"));
+
+document.getElementById("driveCreateBtn").addEventListener("click", async () => {
+  showSetup("step-loading");
+  try {
+    const fileId = await DriveBackend.createNewFile();
+    await finishDriveSetup(fileId);
+  } catch (e) {
+    showSetup("step-drive-choice");
+    alert(e.message || "Couldn't create the file.");
+  }
+});
+
+document.getElementById("drivePasteBtn").addEventListener("click", () => showSetup("step-drive-paste"));
+document.getElementById("drivePasteBack").addEventListener("click", () => showSetup("step-drive-choice"));
+document.getElementById("drivePasteSubmit").addEventListener("click", async () => {
+  const errEl = document.getElementById("drivePasteError");
+  errEl.classList.add("hidden");
+  const fileId = extractDriveFileId(document.getElementById("drivePasteInput").value);
+  if (!fileId) {
+    errEl.textContent = "That doesn't look like a Drive link or file ID.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  showSetup("step-loading");
+  try {
+    await DriveBackend.getFileMeta(fileId);
+    await finishDriveSetup(fileId);
+  } catch (e) {
+    showSetup("step-drive-paste");
+    errEl.textContent = e.message || "Couldn't access that file.";
+    errEl.classList.remove("hidden");
+  }
+});
+
+async function finishDriveSetup(fileId) {
+  Storage.setConfig({ type: "drive", fileId });
+  Storage.activate();
+  await Storage.ensureInitialized();
+  data = await Storage.load();
+  onConnected();
+}
 
 /* ─────────────────────────── Bottom nav ─────────────────────────── */
 
@@ -240,9 +282,7 @@ async function commitBabyName() {
   babyNameInput.classList.add("hidden");
   babyNameDisplay.classList.remove("hidden");
   if (val !== data.babyName) {
-    data.babyName = val;
-    renderAll();
-    await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify({ baby_name: val }) });
+    await withMutation((s) => ({ ...s, babyName: val }));
   }
 }
 babyNameInput.addEventListener("blur", commitBabyName);
@@ -269,33 +309,31 @@ function derived() {
     ...feeds.map((f) => ({
       cat: "feeds", key: "f" + f.id, time: f.time, icon: "🍼", cls: "feed-soft",
       title: f.type === "bottle" ? `Bottle · ${f.amount_ml} ml` : `Breast · ${f.side} · ${f.duration_min} min`,
-      sub: (f.note || "") + byLine(f.by), del: () => removeItem("feeds", f.id),
+      sub: (f.note || "") + byLine(f.by), delKind: "feeds", delId: f.id,
     })),
     ...naps.map((n) => ({
       cat: "naps", key: "n" + n.id, time: n.start, icon: "😴", cls: "sleep-soft",
       title: `Nap · ${fmtDur(minsBetween(n.start, n.end))}`,
-      sub: `${fmtClock(n.start)} – ${fmtClock(n.end)}${byLine(n.by)}`, del: () => removeItem("naps", n.id),
+      sub: `${fmtClock(n.start)} – ${fmtClock(n.end)}${byLine(n.by)}`, delKind: "naps", delId: n.id,
     })),
     ...meals.map((m) => ({
       cat: "meals", key: "m" + m.id, time: m.time,
       icon: m.reaction === "loved" ? "😋" : m.reaction === "refused" ? "🙅" : "😐", cls: "meal-soft",
-      title: `${m.slot} · ${m.foods.join(", ")}`, sub: (m.note || "") + byLine(m.by), del: () => removeItem("meals", m.id),
+      title: `${m.slot} · ${m.foods.join(", ")}`, sub: (m.note || "") + byLine(m.by), delKind: "meals", delId: m.id,
     })),
     ...diapers.map((x) => ({
       cat: "diapers", key: "d" + x.id, time: x.time,
       icon: x.kind === "wet" ? "💧" : x.kind === "dirty" ? "💩" : "🌀", cls: "diaper-soft",
       title: x.kind === "wet" ? "Diaper · wet" : x.kind === "dirty" ? "Diaper · dirty" : "Diaper · wet + dirty",
-      sub: byLine(x.by).replace(" · ", ""), del: () => removeItem("diapers", x.id),
+      sub: byLine(x.by).replace(" · ", ""), delKind: "diapers", delId: x.id,
     })),
   ].sort((a, b) => new Date(b.time) - new Date(a.time));
 
   return { todayFeeds, todayNaps, todayMeals, todayDiapers, lastFeed, lastDiaper, napMins, totalMl, schedule, nextItem, allRows };
 }
 
-async function removeItem(kind, id) {
-  const endpoint = { feeds: "feeds", naps: "naps", meals: "meals", diapers: "diapers", growth: "growth", schedule: "schedule", prep: "prep" }[kind];
-  await apiFetch(`/api/${endpoint}/${id}`, { method: "DELETE" });
-  await reloadState();
+function removeItem(kind, id) {
+  return withMutation((s) => ({ ...s, [kind]: s[kind].filter((x) => x.id !== id) }));
 }
 
 /* ─────────────────────────── Render: master ─────────────────────────── */
@@ -376,7 +414,7 @@ function renderToday(d) {
   document.getElementById("todayList").innerHTML = todayRows.length
     ? todayRows.map((r) => rowHtml(r, fmtClock(r.time))).join("")
     : `<div class="empty-note">Nothing logged yet today. Tap a button above to start.</div>`;
-  wireRowDeletes("todayList", todayRows);
+  wireRowDeletes("todayList");
 }
 
 function dot(leftPct, top, color, square, bottom) {
@@ -399,15 +437,14 @@ function rowHtml(r, rightText) {
         ${r.sub ? `<div class="row-sub">${escapeHtml(r.sub)}</div>` : ""}
       </div>
       <div class="row-right">${escapeHtml(rightText)}</div>
-      ${r.del ? `<button class="row-del" aria-label="Delete entry" data-del="${r.key}">🗑</button>` : ""}
+      <button class="row-del" aria-label="Delete entry" data-del-kind="${r.delKind}" data-del-id="${r.delId}">🗑</button>
     </div>`;
 }
 
-function wireRowDeletes(containerId, rows) {
+function wireRowDeletes(containerId) {
   const container = document.getElementById(containerId);
-  rows.forEach((r) => {
-    const btn = container.querySelector(`[data-del="${r.key}"]`);
-    if (btn) btn.addEventListener("click", r.del);
+  container.querySelectorAll("[data-del-kind]").forEach((btn) => {
+    btn.addEventListener("click", () => removeItem(btn.dataset.delKind, btn.dataset.delId));
   });
 }
 
@@ -416,15 +453,19 @@ document.getElementById("btnDiaper").addEventListener("click", () => openSheet("
 document.getElementById("btnMeal").addEventListener("click", () => openSheet("meal"));
 document.getElementById("btnNap").addEventListener("click", async () => {
   if (data.activeNap) {
-    await apiFetch("/api/naps/end", { method: "POST" });
+    await withMutation((s) => ({
+      ...s, activeNap: null,
+      naps: [{ id: uid(), start: s.activeNap.start, end: new Date().toISOString(), by: s.activeNap.by || null }, ...s.naps],
+    }));
   } else {
-    await apiFetch("/api/naps/start", { method: "POST", body: JSON.stringify({ by: caregiverName() || null }) });
+    await withMutation((s) => ({ ...s, activeNap: { start: new Date().toISOString(), by: caregiverName() || null } }));
   }
-  await reloadState();
 });
 document.getElementById("endNapBtn2").addEventListener("click", async () => {
-  await apiFetch("/api/naps/end", { method: "POST" });
-  await reloadState();
+  await withMutation((s) => s.activeNap ? ({
+    ...s, activeNap: null,
+    naps: [{ id: uid(), start: s.activeNap.start, end: new Date().toISOString(), by: s.activeNap.by || null }, ...s.naps],
+  }) : s);
 });
 
 /* ─────────────────────────── Render: History ─────────────────────────── */
@@ -455,7 +496,7 @@ function renderHistory(d) {
   document.getElementById("historyList").innerHTML = shown.length
     ? shown.map((r) => rowHtml(r, (isToday(r.time) ? "Today" : fmtDate(r.time)) + " · " + fmtClock(r.time))).join("")
     : `<div class="empty-note">No entries here yet.</div>`;
-  wireRowDeletes("historyList", shown);
+  wireRowDeletes("historyList");
 }
 
 /* ─────────────────────────── Render: Growth ─────────────────────────── */
@@ -495,13 +536,10 @@ function renderGrowth() {
           ${g.by ? `<div class="row-sub">by ${escapeHtml(g.by)}</div>` : ""}
         </div>
         <div class="row-right">${fmtDate(g.date)}</div>
-        <button class="row-del" data-growth-del="${g.id}">🗑</button>
+        <button class="row-del" data-del-kind="growth" data-del-id="${g.id}">🗑</button>
       </div>`).join("")
     : `<div class="empty-note">No measurements yet.</div>`;
-  data.growth.forEach((g) => {
-    const btn = document.querySelector(`[data-growth-del="${g.id}"]`);
-    if (btn) btn.addEventListener("click", () => removeItem("growth", g.id));
-  });
+  wireRowDeletes("growthList");
 }
 
 function drawChart(points) {
@@ -519,7 +557,6 @@ function drawChart(points) {
     return [x, y];
   };
   const ns = "http://www.w3.org/2000/svg";
-  // gridlines
   for (let i = 0; i <= 3; i++) {
     const y = PAD + (i * (H - PAD * 2)) / 3;
     const line = document.createElementNS(ns, "line");
@@ -528,7 +565,6 @@ function drawChart(points) {
     line.setAttribute("stroke", "#ECE9F4"); line.setAttribute("stroke-dasharray", "4 4");
     svg.appendChild(line);
   }
-  // path
   const d = points.map((_, i) => { const [x, y] = xy(i); return `${i === 0 ? "M" : "L"}${x},${y}`; }).join(" ");
   const path = document.createElementNS(ns, "path");
   path.setAttribute("d", d);
@@ -538,7 +574,6 @@ function drawChart(points) {
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
   svg.appendChild(path);
-  // dots + x labels
   points.forEach((p, i) => {
     const [x, y] = xy(i);
     const c = document.createElementNS(ns, "circle");
@@ -568,13 +603,10 @@ function renderPlan() {
         <div class="row-icon" style="background:var(--${typeColor[s.type]}-soft)">${typeIcon[s.type] || "⭐"}</div>
         <div class="row-body"><div class="row-title">${escapeHtml(s.label)}</div></div>
         <div class="row-right">${s.time}</div>
-        <button class="row-del" data-sched-del="${s.id}">🗑</button>
+        <button class="row-del" data-del-kind="schedule" data-del-id="${s.id}">🗑</button>
       </div>`).join("")
     : `<div class="empty-note">No routine items yet. Add feeds, naps, and meals to build the day.</div>`;
-  schedule.forEach((s) => {
-    const btn = document.querySelector(`[data-sched-del="${s.id}"]`);
-    if (btn) btn.addEventListener("click", () => removeItem("schedule", s.id));
-  });
+  wireRowDeletes("scheduleList");
 
   renderPlanTable();
   renderPrepList();
@@ -615,11 +647,9 @@ document.getElementById("planEditorInput").addEventListener("keydown", (e) => { 
 async function savePlanCell() {
   if (!openPlanKey) return;
   const val = document.getElementById("planEditorInput").value.trim();
-  data.mealPlan[openPlanKey] = val;
-  document.getElementById("planEditor").classList.add("hidden");
   const key = openPlanKey; openPlanKey = null;
-  renderPlanTable();
-  await apiFetch(`/api/meal-plan/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify({ value: val }) });
+  document.getElementById("planEditor").classList.add("hidden");
+  await withMutation((s) => ({ ...s, mealPlan: { ...s.mealPlan, [key]: val } }));
 }
 
 function renderPrepList() {
@@ -628,15 +658,14 @@ function renderPrepList() {
     <div class="prep-row">
       <button class="prep-check ${p.done ? "done" : ""}" data-prep-toggle="${p.id}">${p.done ? "✓" : ""}</button>
       <div class="prep-text ${p.done ? "done" : ""}">${escapeHtml(p.text)}</div>
-      <button class="row-del" data-prep-del="${p.id}">🗑</button>
+      <button class="row-del" data-del-kind="prepList" data-del-id="${p.id}">🗑</button>
     </div>`).join("") : `<div class="empty-note">Add prep tasks — purées to batch, bottles to sterilise, snacks to pack.</div>`;
-  data.prepList.forEach((p) => {
-    document.querySelector(`[data-prep-toggle="${p.id}"]`)?.addEventListener("click", async () => {
-      await apiFetch(`/api/prep/${p.id}`, { method: "PATCH", body: JSON.stringify({ done: !p.done }) });
-      await reloadState();
-    });
-    document.querySelector(`[data-prep-del="${p.id}"]`)?.addEventListener("click", () => removeItem("prep", p.id));
+  list.querySelectorAll("[data-prep-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => withMutation((s) => ({
+      ...s, prepList: s.prepList.map((p) => p.id === btn.dataset.prepToggle ? { ...p, done: !p.done } : p),
+    })));
   });
+  wireRowDeletes("prepList");
 }
 
 document.getElementById("prepAddBtn").addEventListener("click", addPrep);
@@ -646,8 +675,7 @@ async function addPrep() {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
-  await apiFetch("/api/prep", { method: "POST", body: JSON.stringify({ text }) });
-  await reloadState();
+  await withMutation((s) => ({ ...s, prepList: [...s.prepList, { id: uid(), text, done: false }] }));
 }
 
 document.getElementById("btnAddSchedule").addEventListener("click", () => openSheet("schedule"));
@@ -657,25 +685,49 @@ document.getElementById("btnAddSchedule").addEventListener("click", () => openSh
 function renderFamily() {
   document.getElementById("babyNameSetting").value = data.babyName;
   document.getElementById("caregiverInput").value = caregiverName();
-  document.getElementById("serverAddrDisplay").textContent =
-    API_BASE || (location.origin + " (this device)");
+
+  const cfg = Storage.getConfig();
+  const isDrive = cfg && cfg.type === "drive";
+  document.getElementById("storeDisplay").textContent = cfg
+    ? cfg.type === "github" ? `GitHub — ${cfg.owner}/${cfg.repo}/${cfg.path}` : `Google Drive — file ID ${cfg.fileId.slice(0, 12)}…`
+    : "Not connected";
+  document.getElementById("driveShareCard").classList.toggle("hidden", !isDrive);
+  document.getElementById("familyExplainer").textContent = isDrive
+    ? "Every account this file is shared with sees and edits the same log. Invite the other caregiver below, or from the Drive app itself."
+    : "Every device using this same repo + token sees and edits the same log. Give the other caregiver the same owner/repo/path and a token of their own (or the same one).";
   document.getElementById("syncFooter").textContent =
-    "New entries from other devices appear automatically, usually within a few seconds.";
+    "New entries from other devices appear automatically, usually within about 15 seconds.";
 }
 
 document.getElementById("babyNameSetting").addEventListener("change", async (e) => {
   const val = e.target.value.trim() || "Baby";
-  data.babyName = val;
-  renderHeader();
-  await apiFetch("/api/settings", { method: "PUT", body: JSON.stringify({ baby_name: val }) });
+  await withMutation((s) => ({ ...s, babyName: val }));
 });
 document.getElementById("caregiverInput").addEventListener("change", (e) => {
   localStorage.setItem("caregiverName", e.target.value.trim());
   renderHeader();
 });
-document.getElementById("btnChangeServer").addEventListener("click", () => {
+document.getElementById("btnChangeStore").addEventListener("click", () => {
+  if (!confirm("Switch data store? You'll need to reconnect (this device only — your data stays wherever it is).")) return;
+  clearInterval(pollTimer); clearInterval(clockTimer);
+  Storage.clearConfig();
   document.getElementById("app").classList.add("hidden");
-  showServerGate();
+  showSetup("step-choose");
+});
+document.getElementById("shareEmailBtn").addEventListener("click", async () => {
+  const email = document.getElementById("shareEmailInput").value.trim();
+  const statusEl = document.getElementById("shareStatus");
+  if (!email) return;
+  const cfg = Storage.getConfig();
+  try {
+    await DriveBackend.shareWith(cfg.fileId, email);
+    statusEl.textContent = `Shared with ${email}.`;
+    statusEl.classList.remove("hidden");
+    document.getElementById("shareEmailInput").value = "";
+  } catch (e) {
+    statusEl.textContent = e.message || "Couldn't share — check the email address.";
+    statusEl.classList.remove("hidden");
+  }
 });
 
 /* ─────────────────────────── Sheets (modals) ─────────────────────────── */
@@ -818,20 +870,19 @@ function wireSheet(kind) {
     }));
     document.getElementById("feedSaveBtn").addEventListener("click", async () => {
       const note = document.getElementById("feedNote").value.trim();
-      const body = type === "bottle"
-        ? { type, amount_ml: Math.round(parseFloat(document.getElementById("feedAmount").value || 0) * (unit === "oz" ? 29.57 : 1)), note, by: caregiverName() || null }
-        : { type, side, duration_min: parseInt(document.getElementById("feedDuration").value || 0, 10), note, by: caregiverName() || null };
+      const entry = type === "bottle"
+        ? { id: uid(), time: new Date().toISOString(), type, amount_ml: Math.round(parseFloat(document.getElementById("feedAmount").value || 0) * (unit === "oz" ? 29.57 : 1)), side: null, duration_min: null, note, by: caregiverName() || null }
+        : { id: uid(), time: new Date().toISOString(), type, amount_ml: null, side, duration_min: parseInt(document.getElementById("feedDuration").value || 0, 10), note, by: caregiverName() || null };
       closeSheet();
-      await apiFetch("/api/feeds", { method: "POST", body: JSON.stringify(body) });
-      await reloadState();
+      await withMutation((s) => ({ ...s, feeds: [entry, ...s.feeds] }));
     });
   }
 
   if (kind === "diaper") {
     document.querySelectorAll("[data-diaper-kind]").forEach((btn) => btn.addEventListener("click", async () => {
+      const entry = { id: uid(), time: new Date().toISOString(), kind: btn.dataset.diaperKind, by: caregiverName() || null };
       closeSheet();
-      await apiFetch("/api/diapers", { method: "POST", body: JSON.stringify({ kind: btn.dataset.diaperKind, by: caregiverName() || null }) });
-      await reloadState();
+      await withMutation((s) => ({ ...s, diapers: [entry, ...s.diapers] }));
     }));
   }
 
@@ -853,9 +904,9 @@ function wireSheet(kind) {
       const foods = foodsInput.value.split(",").map((s) => s.trim()).filter(Boolean);
       if (!foods.length) return;
       const note = document.getElementById("mealNote").value.trim();
+      const entry = { id: uid(), time: new Date().toISOString(), slot, foods, reaction, note, by: caregiverName() || null };
       closeSheet();
-      await apiFetch("/api/meals", { method: "POST", body: JSON.stringify({ slot, foods, reaction, note, by: caregiverName() || null }) });
-      await reloadState();
+      await withMutation((s) => ({ ...s, meals: [entry, ...s.meals] }));
     });
   }
 
@@ -865,15 +916,15 @@ function wireSheet(kind) {
     const check = () => { saveBtn.disabled = !(wEl.value || hEl.value || headEl.value); };
     [wEl, hEl, headEl].forEach((el) => el.addEventListener("input", check));
     saveBtn.addEventListener("click", async () => {
-      const body = {
+      const entry = {
+        id: uid(), date: new Date().toISOString(),
         weight_kg: wEl.value ? parseFloat(wEl.value) : null,
         height_cm: hEl.value ? parseFloat(hEl.value) : null,
         head_cm: headEl.value ? parseFloat(headEl.value) : null,
         by: caregiverName() || null,
       };
       closeSheet();
-      await apiFetch("/api/growth", { method: "POST", body: JSON.stringify(body) });
-      await reloadState();
+      await withMutation((s) => ({ ...s, growth: [entry, ...s.growth].sort((a, b) => new Date(b.date) - new Date(a.date)) }));
     });
   }
 
@@ -892,10 +943,9 @@ function wireSheet(kind) {
     saveBtn.addEventListener("click", async () => {
       const label = labelEl.value.trim();
       if (!label) return;
-      const time = document.getElementById("schedTime").value;
+      const entry = { id: uid(), time: document.getElementById("schedTime").value, label, type };
       closeSheet();
-      await apiFetch("/api/schedule", { method: "POST", body: JSON.stringify({ time, label, type }) });
-      await reloadState();
+      await withMutation((s) => ({ ...s, schedule: [...s.schedule, entry] }));
     });
   }
 }

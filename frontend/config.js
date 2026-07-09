@@ -1,14 +1,14 @@
 // Runtime configuration.
 //
-// When the frontend is served BY the same FastAPI server (the normal
-// case), leave API_BASE as "" — the app calls /api/... on its own origin.
+// GOOGLE_CLIENT_ID is only needed if you plan to offer Google Drive as a
+// storage option. It is a PUBLIC identifier (not a secret) — safe to commit
+// to a public repo. Get one from Google Cloud Console -> APIs & Services ->
+// Credentials -> "OAuth client ID" -> Application type: "Web application".
+// Add your app's exact URL (e.g. https://you.github.io/baby-tracker/) under
+// "Authorized JavaScript origins". See README.md for full step-by-step setup.
 //
-// When you package this frontend into the Capacitor/APK wrapper, the
-// app runs from a different origin (capacitor://localhost) and needs
-// to know your server's real address. Set it here before building,
-// e.g.:
-//   API_BASE: "https://babytracker.yourdomain.com"
-//   API_BASE: "http://203.0.113.10:8000"
+// If you only want GitHub as a storage option, leave this blank -- the
+// Google Drive setup button will simply explain it's not configured.
 window.CONFIG = {
-  API_BASE: "",
+  GOOGLE_CLIENT_ID: "",
 };

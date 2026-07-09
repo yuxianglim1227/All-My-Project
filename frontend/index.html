@@ -17,28 +17,102 @@
 </head>
 <body>
 
-  <!-- Access-code gate, shown only if the server requires one -->
-  <div id="gate" class="gate hidden">
-    <div class="gate-card">
+  <!-- Setup overlay: walks through choosing + configuring a data store.
+       Only one of the step divs below is visible at a time. -->
+  <div id="setupOverlay" class="gate hidden">
+
+    <div id="step-choose" class="gate-card">
       <div class="gate-emoji">🧸</div>
       <div class="gate-title">Baby Tracker</div>
-      <div class="gate-sub">Enter the family access code</div>
-      <input id="gate-input" type="password" inputmode="text" placeholder="Access code" autocomplete="off" />
-      <button id="gate-submit" class="primary-btn">Unlock</button>
-      <div id="gate-error" class="gate-error hidden">That code didn't work. Try again.</div>
+      <div class="gate-sub">Where should this app keep its data?</div>
+      <button class="choice-card" id="chooseGithub">
+        <div class="choice-emoji">🐙</div>
+        <div>
+          <div class="choice-title">GitHub</div>
+          <div class="choice-sub">A JSON file in a repo you own. Simple shared access token.</div>
+        </div>
+      </button>
+      <button class="choice-card" id="chooseDrive">
+        <div class="choice-emoji">📁</div>
+        <div>
+          <div class="choice-title">Google Drive</div>
+          <div class="choice-sub">A file in your Drive, shared with the other caregiver.</div>
+        </div>
+      </button>
+    </div>
+
+    <div id="step-github" class="gate-card hidden">
+      <div class="gate-title">Connect GitHub</div>
+      <div class="gate-sub">Uses a Personal Access Token scoped to one repo</div>
+      <div class="field">
+        <div class="field-label">Repo owner</div>
+        <input id="ghOwner" class="text-input" placeholder="e.g. yourname" autocomplete="off" />
+      </div>
+      <div class="field">
+        <div class="field-label">Repo name</div>
+        <input id="ghRepo" class="text-input" placeholder="e.g. baby-tracker-data" autocomplete="off" />
+      </div>
+      <div class="field">
+        <div class="field-label">File path</div>
+        <input id="ghPath" class="text-input" value="baby-tracker-data.json" autocomplete="off" />
+      </div>
+      <div class="field">
+        <div class="field-label">Personal access token</div>
+        <input id="ghToken" type="password" class="text-input" placeholder="github_pat_..." autocomplete="off" />
+      </div>
+      <button class="primary-btn" id="ghConnectBtn">Connect</button>
+      <button class="text-link-btn" id="ghBack">← choose a different store</button>
+      <div id="ghError" class="gate-error hidden"></div>
+    </div>
+
+    <div id="step-drive" class="gate-card hidden">
+      <div class="gate-title">Connect Google Drive</div>
+      <div class="gate-sub">Sign in, then we'll find or create the shared file</div>
+      <button class="primary-btn" id="driveSignInBtn">Sign in with Google</button>
+      <button class="text-link-btn" id="driveBack">← choose a different store</button>
+      <div id="driveError" class="gate-error hidden"></div>
+    </div>
+
+    <div id="step-drive-found" class="gate-card hidden">
+      <div class="gate-emoji">📁</div>
+      <div class="gate-title">Found a shared file</div>
+      <div class="gate-sub" id="driveFoundSub"></div>
+      <button class="primary-btn" id="driveUseFoundBtn">Use this file</button>
+      <button class="text-link-btn" id="driveNotThisOne">← that's not it</button>
+    </div>
+
+    <div id="step-drive-choice" class="gate-card hidden">
+      <div class="gate-title">No shared file found yet</div>
+      <div class="gate-sub">Are you setting this up for the first time, or joining as the second caregiver?</div>
+      <button class="choice-card" id="driveCreateBtn">
+        <div class="choice-emoji">✨</div>
+        <div><div class="choice-title">Create it</div><div class="choice-sub">I'm setting this up for the first time</div></div>
+      </button>
+      <button class="choice-card" id="drivePasteBtn">
+        <div class="choice-emoji">🔗</div>
+        <div><div class="choice-title">I have a link</div><div class="choice-sub">The other caregiver shared a file with me</div></div>
+      </button>
+    </div>
+
+    <div id="step-drive-paste" class="gate-card hidden">
+      <div class="gate-title">Paste the file link or ID</div>
+      <input id="drivePasteInput" class="text-input" placeholder="https://drive.google.com/file/d/..." autocomplete="off" />
+      <button class="primary-btn" id="drivePasteSubmit">Connect</button>
+      <button class="text-link-btn" id="drivePasteBack">← back</button>
+      <div id="drivePasteError" class="gate-error hidden"></div>
+    </div>
+
+    <div id="step-loading" class="gate-card hidden">
+      <div class="gate-emoji">🧸</div>
+      <div class="gate-sub">Connecting…</div>
     </div>
   </div>
 
-  <!-- Server-address setup, shown only if API_BASE is unset and we're not same-origin -->
-  <div id="serverGate" class="gate hidden">
-    <div class="gate-card">
-      <div class="gate-emoji">📡</div>
-      <div class="gate-title">Connect to your server</div>
-      <div class="gate-sub">Enter the address of your Baby Tracker server</div>
-      <input id="server-input" type="text" placeholder="https://your-server-address" autocomplete="off" />
-      <button id="server-submit" class="primary-btn">Connect</button>
-      <div id="server-error" class="gate-error hidden">Couldn't reach that address.</div>
-    </div>
+  <!-- Small in-app banner for a lapsed Google session (not a full gate —
+       keeps the person in the app instead of bouncing them back to setup) -->
+  <div id="reconnectBanner" class="reconnect-banner hidden">
+    <span>Google Drive session expired</span>
+    <button id="reconnectBtn">Reconnect</button>
   </div>
 
   <div id="app" class="app hidden">
@@ -177,21 +251,30 @@
           <input id="caregiverInput" class="text-input" placeholder="e.g. Mum, Dad, Nana" />
         </div>
 
-        <div class="section-title"><span>Server connection</span></div>
+        <div class="section-title"><span>Data store</span></div>
         <div class="card">
-          <div class="field-label">Connected to</div>
-          <div id="serverAddrDisplay" class="server-addr"></div>
-          <button class="small-btn" id="btnChangeServer" style="margin-top:10px">Change server address</button>
+          <div class="field-label">Storing data in</div>
+          <div id="storeDisplay" class="server-addr"></div>
+          <button class="small-btn" id="btnChangeStore" style="margin-top:10px">Switch data store</button>
+        </div>
+
+        <div id="driveShareCard" class="card hidden" style="margin-top:12px">
+          <div class="field-label">Share with another caregiver</div>
+          <div style="display:flex;gap:8px">
+            <input id="shareEmailInput" class="text-input" placeholder="their-email@gmail.com" style="flex:1" />
+            <button class="small-btn-solid" id="shareEmailBtn">Invite</button>
+          </div>
+          <div class="note-block muted" style="margin-top:10px">
+            They'll get access to this file in their own Drive. They should then
+            open this app, choose Google Drive, sign in with that same email,
+            and it'll be found automatically.
+          </div>
+          <div id="shareStatus" class="note-block hidden"></div>
         </div>
 
         <div class="section-title"><span>About family sharing</span></div>
         <div class="card">
-          <div class="note-block">
-            Every device that connects to this same server address sees and
-            edits the same log, live. There's no separate "sharing toggle" —
-            add the second phone by opening this app and entering your
-            server's address (see the README for setup steps).
-          </div>
+          <div class="note-block" id="familyExplainer"></div>
           <div class="note-block muted" id="syncFooter"></div>
         </div>
       </div>
@@ -215,6 +298,9 @@
   </div>
 
   <script src="config.js"></script>
+  <script src="storage.js"></script>
+  <script src="storage-github.js"></script>
+  <script src="storage-drive.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
