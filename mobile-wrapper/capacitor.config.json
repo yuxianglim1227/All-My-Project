@@ -1,0 +1,12 @@
+{
+  "appId": "com.yourfamily.babytracker",
+  "appName": "Baby Tracker",
+  "webDir": "www",
+  "backgroundColor": "#F6F4FA",
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

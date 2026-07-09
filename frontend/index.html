@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#F6F4FA" />
+<title>Baby Tracker</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Baby Tracker" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- Access-code gate, shown only if the server requires one -->
+  <div id="gate" class="gate hidden">
+    <div class="gate-card">
+      <div class="gate-emoji">🧸</div>
+      <div class="gate-title">Baby Tracker</div>
+      <div class="gate-sub">Enter the family access code</div>
+      <input id="gate-input" type="password" inputmode="text" placeholder="Access code" autocomplete="off" />
+      <button id="gate-submit" class="primary-btn">Unlock</button>
+      <div id="gate-error" class="gate-error hidden">That code didn't work. Try again.</div>
+    </div>
+  </div>
+
+  <!-- Server-address setup, shown only if API_BASE is unset and we're not same-origin -->
+  <div id="serverGate" class="gate hidden">
+    <div class="gate-card">
+      <div class="gate-emoji">📡</div>
+      <div class="gate-title">Connect to your server</div>
+      <div class="gate-sub">Enter the address of your Baby Tracker server</div>
+      <input id="server-input" type="text" placeholder="https://your-server-address" autocomplete="off" />
+      <button id="server-submit" class="primary-btn">Connect</button>
+      <div id="server-error" class="gate-error hidden">Couldn't reach that address.</div>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <div class="wrap">
+      <!-- Header -->
+      <div class="header">
+        <div>
+          <div id="greeting" class="greeting">Good morning</div>
+          <div id="babyNameDisplay" class="baby-name">Baby <span class="edit-hint">✎</span></div>
+          <input id="babyNameInput" class="baby-name-input hidden" />
+        </div>
+        <div class="header-right">
+          <div class="teddy">🧸</div>
+          <div id="syncBadge" class="sync-badge hidden">⇅ synced</div>
+        </div>
+      </div>
+
+      <!-- TODAY -->
+      <div id="tab-today" class="tab-panel">
+        <div class="card">
+          <div class="card-row">
+            <div class="card-title" id="ribbonTitle">Baby's day</div>
+            <div class="card-date" id="todayDate"></div>
+          </div>
+          <div class="ribbon" id="ribbon"></div>
+          <div class="ribbon-scale">
+            <span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>12am</span>
+          </div>
+          <div class="legend">
+            <span><i style="background:var(--sleep)"></i>Sleep</span>
+            <span><i style="background:var(--feed)"></i>Feeds</span>
+            <span><i style="background:var(--diaper)"></i>Diapers</span>
+            <span><i style="background:var(--meal)"></i>Meals</span>
+          </div>
+        </div>
+
+        <div class="quick-grid">
+          <button class="big-btn" data-soft="feed" id="btnFeed">
+            <span class="big-icon" style="background:var(--feed)">🍼</span>
+            <span class="big-label">Feed</span>
+            <span class="big-sub" id="lastFeedSub">none yet</span>
+          </button>
+          <button class="big-btn" data-soft="sleep" id="btnNap">
+            <span class="big-icon" style="background:var(--sleep)" id="napIcon">😴</span>
+            <span class="big-label" id="napLabel">Start nap</span>
+            <span class="big-sub" id="napSub">0m today</span>
+          </button>
+          <button class="big-btn" data-soft="diaper" id="btnDiaper">
+            <span class="big-icon" style="background:var(--diaper)">🧷</span>
+            <span class="big-label">Diaper</span>
+            <span class="big-sub" id="lastDiaperSub">none yet</span>
+          </button>
+          <button class="big-btn" data-soft="meal" id="btnMeal">
+            <span class="big-icon" style="background:var(--meal)">🥣</span>
+            <span class="big-label">Meal</span>
+            <span class="big-sub" id="mealCountSub">0 today</span>
+          </button>
+        </div>
+
+        <div class="stat-row" id="statRow"></div>
+
+        <div id="nextUpCard" class="card next-card hidden">
+          <div class="next-icon" id="nextIcon">⭐</div>
+          <div>
+            <div class="next-label" id="nextLabel">UP NEXT</div>
+            <div class="next-title" id="nextTitle"></div>
+          </div>
+        </div>
+
+        <div class="section-title">
+          <span>Recent activity</span>
+          <button class="link-btn" data-goto="history">See all</button>
+        </div>
+        <div class="card list-card" id="todayList"></div>
+      </div>
+
+      <!-- HISTORY -->
+      <div id="tab-history" class="tab-panel hidden">
+        <div class="chip-row" id="historyFilters"></div>
+        <div id="activeNapCard" class="card active-nap-card hidden">
+          <div class="next-icon">😴</div>
+          <div style="flex:1">
+            <div class="next-title" id="activeNapText"></div>
+            <div class="next-label" id="activeNapSince"></div>
+          </div>
+          <button class="small-btn" id="endNapBtn2">End</button>
+        </div>
+        <div class="card list-card" id="historyList" style="margin-top:12px"></div>
+      </div>
+
+      <!-- GROWTH -->
+      <div id="tab-growth" class="tab-panel hidden">
+        <div class="chip-row" id="growthMetricChips"></div>
+        <div class="card">
+          <svg id="growthChart" viewBox="0 0 320 200" class="chart-svg"></svg>
+          <div id="growthEmpty" class="empty-note hidden">Add at least two measurements to see the curve.</div>
+        </div>
+        <button class="primary-btn" id="btnAddGrowth" style="margin-top:14px">＋ Add measurement</button>
+        <div class="section-title"><span>Measurement log</span></div>
+        <div class="card list-card" id="growthList"></div>
+      </div>
+
+      <!-- PLAN -->
+      <div id="tab-plan" class="tab-panel hidden">
+        <div class="section-title">
+          <span>Daily routine</span>
+          <button class="link-btn" id="btnAddSchedule">＋ Add</button>
+        </div>
+        <div class="card list-card" id="scheduleList"></div>
+
+        <div class="section-title"><span>Weekly meal plan</span></div>
+        <div class="card" style="overflow-x:auto">
+          <table class="plan-table" id="planTable"></table>
+          <div id="planEditor" class="plan-editor hidden">
+            <input id="planEditorInput" placeholder="What to serve?" />
+            <button class="small-btn-solid" id="planEditorSave">Save</button>
+          </div>
+        </div>
+
+        <div class="section-title"><span>Prep checklist</span></div>
+        <div class="card">
+          <div class="prep-add-row">
+            <input id="prepInput" placeholder="e.g. Batch-cook sweet potato purée" />
+            <button class="small-btn-solid" id="prepAddBtn">Add</button>
+          </div>
+          <div id="prepList"></div>
+        </div>
+      </div>
+
+      <!-- FAMILY -->
+      <div id="tab-family" class="tab-panel hidden">
+        <div class="card">
+          <div class="field-label">Baby's name</div>
+          <input id="babyNameSetting" class="text-input" />
+          <div class="field-label" style="margin-top:14px">Your name (shown on entries you log)</div>
+          <input id="caregiverInput" class="text-input" placeholder="e.g. Mum, Dad, Nana" />
+        </div>
+
+        <div class="section-title"><span>Server connection</span></div>
+        <div class="card">
+          <div class="field-label">Connected to</div>
+          <div id="serverAddrDisplay" class="server-addr"></div>
+          <button class="small-btn" id="btnChangeServer" style="margin-top:10px">Change server address</button>
+        </div>
+
+        <div class="section-title"><span>About family sharing</span></div>
+        <div class="card">
+          <div class="note-block">
+            Every device that connects to this same server address sees and
+            edits the same log, live. There's no separate "sharing toggle" —
+            add the second phone by opening this app and entering your
+            server's address (see the README for setup steps).
+          </div>
+          <div class="note-block muted" id="syncFooter"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom nav -->
+    <div class="bottom-nav">
+      <div class="wrap nav-inner">
+        <button class="nav-btn active" data-tab="today"><span>🏠</span><small>Today</small></button>
+        <button class="nav-btn" data-tab="history"><span>📖</span><small>History</small></button>
+        <button class="nav-btn" data-tab="growth"><span>📈</span><small>Growth</small></button>
+        <button class="nav-btn" data-tab="plan"><span>🗓</span><small>Plan</small></button>
+        <button class="nav-btn" data-tab="family"><span>👨‍👩‍👧</span><small>Family</small></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sheet / modal container -->
+  <div id="sheetOverlay" class="sheet-overlay hidden">
+    <div class="sheet" id="sheetContent"></div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
