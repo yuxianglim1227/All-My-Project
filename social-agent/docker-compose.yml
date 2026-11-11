@@ -1,0 +1,22 @@
+# NOTE: not run in the session that created it. Put a reverse proxy with HTTPS (Caddy, Traefik, Cloudflare Tunnel)
+# in front of port 8080 and set PUBLIC_BASE_URL to that https:// address.
+services:
+  agent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data        # database, prepared media, inbox
+      - ./config:/app/config    # brand.yaml (edit freely; reloaded automatically)
+
+  # Optional: lifts Telegram's 20 MB bot download limit. Needs api id/hash from https://my.telegram.org
+  # Then set TELEGRAM_API_BASE=http://bot-api:8081 in .env.  (Check the image's docs before relying on this.)
+  # bot-api:
+  #   image: aiogram/telegram-bot-api:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
+  #     TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
+  #     TELEGRAM_LOCAL: "1"

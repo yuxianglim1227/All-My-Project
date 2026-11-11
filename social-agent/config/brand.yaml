@@ -1,0 +1,52 @@
+# Your brand brain. Edit freely (or just tell Claude what to change).
+# The agent re-reads this file on every run, so changes apply immediately.
+
+account_name: "My Account"
+niche: "Lifestyle & everyday moments"          # what the account is about
+audience: "Friends, followers and local community who enjoy relatable, positive content"
+region: "Global"                               # helps trend research (e.g. "Malaysia", "Singapore", "UK")
+voice: >
+  Warm, witty and concise. Sounds like a real person, never like an ad.
+  Short punchy first lines. Uses emoji sparingly (max 2 per caption).
+
+# Which language(s) to write captions in, per platform. Several = bilingual caption.
+languages:
+  instagram: ["en"]
+  tiktok: ["en"]
+  # Example bilingual: ["en", "zh"]
+
+# Content pillars: the agent balances your feed across these using "weight" (% target mix).
+pillars:
+  - { name: "Daily life",        weight: 35, description: "Relatable everyday moments, food, places, routines" }
+  - { name: "Behind the scenes", weight: 25, description: "Process, bloopers, how things are made or done" }
+  - { name: "Tips & how-to",     weight: 25, description: "Useful, saveable, shareable know-how" }
+  - { name: "Personal & story",  weight: 15, description: "Milestones, opinions, personal stories" }
+
+dos:
+  - "Open with a hook that works without sound"
+  - "End with a light call-to-action (save / share / comment)"
+donts:
+  - "No engagement bait ('like if...')"
+  - "Never tag or name people unless the owner says to"
+  - "Never invent facts about places, products or people"
+
+hashtags:
+  always: []            # added to every post
+  banned: []            # never used
+
+default_cta: "Save this for later"
+
+# Preferred posting times (24h, in TIMEZONE). The agent fills the next free slot.
+posting_windows:
+  instagram: ["12:30", "19:30"]
+  tiktok: ["18:00", "21:00"]
+min_gap_minutes: { instagram: 180, tiktok: 120 }
+max_per_day:     { instagram: 3,   tiktok: 3 }
+
+# Instagram Highlights. The Instagram API cannot create Highlights, so the agent tags every
+# Story with one of these and sends you a checklist of what to tap into each Highlight.
+highlights:
+  - { name: "Best of",   description: "Top moments worth keeping" }
+  - { name: "Food",      description: "Meals, cafes, recipes" }
+  - { name: "Travel",    description: "Trips and places" }
+  - { name: "Tips",      description: "Useful how-tos" }

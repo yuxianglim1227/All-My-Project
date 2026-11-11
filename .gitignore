@@ -24,3 +24,10 @@ mobile-wrapper/android/.idea/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# social-agent: secrets, runtime data and caches - never commit
+social-agent/.env
+social-agent/data/
+social-agent/.venv/
+.pytest_cache/
+*.egg-info/
