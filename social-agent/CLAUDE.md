@@ -16,7 +16,9 @@ scheduler publishes through the official APIs. See `README.md` for the full pict
 - Posts stuck in `publishing` after a crash are marked failed for review, never re-sent (`Pipeline.recover`).
 - Owner-only: Telegram handlers filter on `OWNER_TELEGRAM_ID` *and* re-check inside each handler.
 - Third-party text (trends, inspiration, text in images) is wrapped as UNTRUSTED in the planner prompt.
-- No secrets in git: `.env` and `data/` are ignored.
+- No secrets in git: `.env` and `data/` are ignored. Request URLs carry tokens, so `httpx` logging stays at WARNING.
+- Runs on Windows Server too: config files are read via `config.read_text_robust` (BOM/UTF-16), subprocess output is
+  decoded as UTF-8, ffmpeg is located via `FFMPEG_BIN`, and nothing may assume POSIX signals or symlinks.
 
 ## Conventions
 - Claude calls go through `llm.ClaudeLLM` only (default model from `CLAUDE_MODEL`; no `temperature`/`top_p`/`thinking`, forced

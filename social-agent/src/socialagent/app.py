@@ -9,6 +9,7 @@ from functools import partial
 import httpx
 
 from . import capcut
+from . import media as media_mod
 from .brain import Planner
 from .config import BrandProfile, Settings
 from .hosting import MediaHost
@@ -60,6 +61,7 @@ def make_publishers(settings: Settings, tokens: TokenBook, http: httpx.Client) -
 def build_app(settings: Settings, notifier: Notifier, *, llm: LLM | None = None, http: httpx.Client | None = None,
               publishers: dict[str, Publisher] | None = None) -> App:
     settings.ensure_dirs()
+    media_mod.configure(settings.ffmpeg_bin, settings.ffprobe_bin)
     http = http or httpx.Client(timeout=60)
     store = Store(settings.db_path)
     brand = BrandProfile.load(settings.brand_file)

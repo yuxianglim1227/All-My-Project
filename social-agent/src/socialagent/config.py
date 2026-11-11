@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import logging
 import os
 import re
@@ -20,6 +21,21 @@ _TRUE = {"1", "true", "yes", "on", "y"}
 _INLINE_COMMENT = re.compile(r"(?:^|\s)#.*$")
 
 
+def read_text_robust(path: str | Path) -> str:
+    """Read a text config file the way Windows editors may have saved it.
+
+    Handles a UTF-8 BOM (Notepad) and UTF-16 (PowerShell's ``>`` / ``Out-File``); anything else must be UTF-8.
+    A BOM left in place would silently turn the first key into "\\ufeffDRY_RUN" and it would be ignored.
+    """
+    raw = Path(path).read_bytes()
+    try:
+        if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            return raw.decode("utf-16")
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path} is not valid UTF-8 - re-save it as UTF-8 (Notepad: Save As > Encoding: UTF-8).") from exc
+
+
 def load_dotenv(path: str | Path = ".env", environ: dict[str, str] | None = None) -> int:
     """Minimal .env loader (KEY=VALUE, quotes, ``# comments``). Existing environment variables win."""
     env = os.environ if environ is None else environ
@@ -27,7 +43,7 @@ def load_dotenv(path: str | Path = ".env", environ: dict[str, str] | None = None
     if not p.is_file():
         return 0
     loaded = 0
-    for raw in p.read_text(encoding="utf-8").splitlines():
+    for raw in read_text_robust(p).splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -104,6 +120,8 @@ class Settings:
     tiktok_privacy: str = "SELF_ONLY"
 
     # editing
+    ffmpeg_bin: str = ""
+    ffprobe_bin: str = ""
     max_reel_seconds: int = 90
     font_path: str = ""
     jianying_drafts_dir: str = ""
@@ -146,6 +164,8 @@ class Settings:
             tiktok_refresh_token=_str(e.get("TIKTOK_REFRESH_TOKEN")),
             tiktok_mode=mode,
             tiktok_privacy=_str(e.get("TIKTOK_PRIVACY"), "SELF_ONLY").upper(),
+            ffmpeg_bin=_str(e.get("FFMPEG_BIN")),
+            ffprobe_bin=_str(e.get("FFPROBE_BIN")),
             max_reel_seconds=_int(e.get("MAX_REEL_SECONDS"), 90),
             font_path=_str(e.get("FONT_PATH")),
             jianying_drafts_dir=_str(e.get("JIANYING_DRAFTS_DIR")),
@@ -241,8 +261,13 @@ class BrandProfile:
         if not path.exists():
             log.warning("Brand file %s not found; using defaults", path)
             return cls()
-        with path.open("r", encoding="utf-8") as fh:
-            return cls.from_dict(yaml.safe_load(fh) or {})
+        try:
+            data = yaml.safe_load(read_text_robust(path)) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"{path} is not valid YAML: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} must contain a YAML mapping (key: value pairs).")
+        return cls.from_dict(data)
 
     @property
     def pillar_names(self) -> list[str]:

@@ -44,7 +44,9 @@ Everything defaults to **DRY RUN**: until you switch it off, nothing is ever pos
 | Claude request shapes (structured output, effort, refusal fallbacks, web search + `pause_turn`) | ✅ matched to the SDK docs and the installed SDK's signatures · ❌ **never called live** (no API key existed in the build environment) |
 | CapCut/Jianying draft calls | ✅ generated a real draft with `pyJianYingDraft` 0.3.1 · ⚠️ not opened in the actual app |
 | Dockerfile / compose | ⚠️ written, not built |
-| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI | ✅ **200+ automated tests** (`python -m pytest -q`) |
+| Windows behaviour (UTF-8 BOM / UTF-16 / CRLF config files, non-UTF-8 ffmpeg output, `FFMPEG_BIN`, Windows font paths, denied symlinks, no POSIX signals, tokens kept out of logs) | ✅ each simulated and covered by tests on Linux · ❌ **never run on real Windows** |
+| `deploy/windows/install.ps1`, the Caddy and scheduled-task steps, AWS security-group advice | ⚠️ written without a Windows machine: run `selfcheck` and read the script before trusting it |
+| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI | ✅ **230+ automated tests** (`python -m pytest -q`) |
 
 **First-run discipline:** `selfcheck` → dry-run with a real photo → one *private* TikTok → one Story/post on a
 throwaway Instagram account → only then set `DRY_RUN=false` on your real accounts.
@@ -76,11 +78,56 @@ re-read on every submission, so changes apply immediately. You can also just tel
 2. Start the agent (`python -m socialagent run`), message your bot `/start`. It replies with **your user id**.
 3. Put that in `OWNER_TELEGRAM_ID` and restart. From then on the bot obeys only you.
 
-### 3.2 Hosting (it must be online and reachable)
-The scheduler, the bot and the public media URLs all need an always-on process with a **public HTTPS** address
-(`PUBLIC_BASE_URL`); Instagram downloads your media from it. Options: a small VPS (Caddy or nginx for HTTPS),
-Fly.io / Railway / Render, or your own PC plus a Cloudflare Tunnel. `docker compose up -d` is provided (untested).
-Media URLs are unguessable tokens and are deleted after 3 days.
+### 3.2 Hosting on an AWS Windows Server (step by step)
+The scheduler, the bot and the public media URLs need an always-on process with a **public HTTPS** address
+(`PUBLIC_BASE_URL`): Instagram downloads your media from it. A Windows Server on AWS does the job; Docker is not needed.
+Telegram uses outbound polling, so the *only* thing that must be reachable from the internet is the HTTPS address.
+(On Linux or elsewhere: a VPS with Caddy, Fly.io/Railway/Render, or `docker compose up -d` also work.)
+
+**You need:** the running instance (Desktop Experience edition; 2 vCPU / 4 GB RAM is a sensible start, though I have not
+benchmarked it: ffmpeg encoding is the only heavy step), an **Elastic IP**, and a **domain name** (any registrar). A domain
+gives a stable HTTPS address (needed for Instagram) and is required to verify the media domain for TikTok photo posts.
+
+1. **AWS console.** Attach an Elastic IP (otherwise the public IP changes when the instance stops). Security group
+   inbound: TCP **80 and 443** from anywhere (certificate issuance needs 80), RDP **3389 only from your own IP**. Do
+   **not** open 8080.
+2. **DNS.** Create an `A` record `agent.yourdomain.com` → the Elastic IP.
+3. **RDP in** and install (all official downloads; versions change, so take the current ones):
+   - **Python 3.12** from python.org (tick *Add python.exe to PATH*, install for all users).
+   - **ffmpeg**: `choco install ffmpeg` if you use Chocolatey, or unzip a Windows build to `C:\ffmpeg`. Then set
+     `FFMPEG_BIN=C:\ffmpeg\bin\ffmpeg.exe` in `.env`: the service runs as SYSTEM, which may not see your PATH.
+   - **Caddy** (single `caddy.exe` from caddyserver.com) into `C:\caddy\`.
+   - **Git** (optional, for easy updates).
+4. **Get the code onto the server:** `git clone -b <branch> <your-repo-url> C:\apps\repo` (for a private repo use a
+   read-only GitHub token; never paste tokens into chats), or zip the `social-agent` folder and copy it over RDP.
+5. **Configure.** In an **elevated PowerShell**: `cd C:\apps\repo\social-agent; .\deploy\windows\install.ps1`. First run creates
+   the virtual environment and a locked-down `.env` (only Administrators/SYSTEM can read it) and stops. Edit it
+   (`notepad .env`): set at least `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `TIMEZONE`,
+   `FFMPEG_BIN`, `HTTP_HOST=127.0.0.1`, `PUBLIC_BASE_URL=https://agent.yourdomain.com`, and a random `API_TOKEN`
+   (generate: `$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)`).
+   Notepad is fine: the agent also accepts UTF-8 with BOM and PowerShell's UTF-16.
+6. **Start it.** Run the script again: it runs `selfcheck`, then registers a start-at-boot task **SocialAgent** that restarts
+   itself if it crashes. It stays in dry-run until you set `DRY_RUN=false`.
+7. **HTTPS.** Copy `deploy\windows\Caddyfile` to `C:\caddy\`, put your hostname in it, allow ports 80/443 in Windows
+   Firewall, then register Caddy to start at boot:
+   ```powershell
+   $a = New-ScheduledTaskAction -Execute "C:\caddy\caddy.exe" -Argument "run --config C:\caddy\Caddyfile" -WorkingDirectory "C:\caddy"
+   $t = New-ScheduledTaskTrigger -AtStartup
+   $s = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+   Register-ScheduledTask -TaskName Caddy -Action $a -Trigger $t -Settings $s -User SYSTEM -RunLevel Highest
+   Start-ScheduledTask -TaskName Caddy
+   ```
+8. **Check from your phone's browser:** `https://agent.yourdomain.com/healthz` must say `ok`. Then message your bot.
+
+**Day-to-day on the server**
+- Logs: `Get-Content C:\apps\repo\social-agent\data\agent.log -Tail 50 -Wait` (tokens are never written to it).
+- Restart: `Stop-ScheduledTask SocialAgent; Start-ScheduledTask SocialAgent` (do it when the queue is idle; a post caught
+  mid-publish is flagged for your review after restart, never silently re-sent).
+- Update: `git pull; .\.venv\Scripts\python.exe -m pip install -e .` then restart the task.
+- Backups: the whole state is `social-agent\data\` (database + media) and `.env`; take EBS snapshots or copy `agent.db`.
+- Security: keep RDP restricted to your IP (or use AWS Systems Manager Session Manager), keep Windows Update on, rotate
+  tokens if the server is ever shared.
+- Leave `JIANYING_DRAFTS_DIR` empty: CapCut drafts would land on the server, and you'd have to RDP in to open them.
 
 ### 3.3 Instagram
 1. Switch the account to **Business or Creator** (Settings → Account type).
@@ -164,7 +211,8 @@ untrusted data · secrets and data are git-ignored · official APIs only.
 | `could not process the media` | Check `PUBLIC_BASE_URL` is public HTTPS and the file opens in a browser |
 | TikTok "audit" error | See §3.4: keep `SELF_ONLY` or use inbox mode until audited |
 | TikTok `url_ownership_unverified` | Verify the domain of `PUBLIC_BASE_URL` in the TikTok portal (photo posts) |
-| On-screen text missing | `selfcheck` shows font status; install `fonts-noto-cjk` for Chinese |
+| On-screen text missing | `selfcheck` shows font status; Chinese needs a CJK font (Linux: `fonts-noto-cjk`; Windows Server may lack Microsoft YaHei: install Noto Sans CJK and set `FONT_PATH`) |
+| `ffmpeg ... is not installed or not reachable` | Set `FFMPEG_BIN` to the full path of `ffmpeg.exe` (the service account may not have your PATH) |
 | "live web search wasn't available" | Trends fall back to evergreen formats; enable web search for your Anthropic org |
 | `File is too big` in Telegram | §4 big-video options |
 | HEIC photo rejected | Send as JPEG/PNG (iOS: Shortcut → Convert Image) |

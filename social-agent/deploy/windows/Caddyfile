@@ -1,0 +1,9 @@
+# Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# 1. Replace the hostname with yours; its DNS A record must point at the server's Elastic IP.
+# 2. Ports 80 and 443 must be open (AWS security group AND Windows Firewall) - certificate issuance needs them.
+# 3. In the agent's .env set  HTTP_HOST=127.0.0.1  and  PUBLIC_BASE_URL=https://agent.example.com
+#    so the agent is reachable ONLY through this proxy.
+# Run:  caddy.exe run --config C:\caddy\Caddyfile     (README shows how to start it at boot)
+agent.example.com {
+	reverse_proxy 127.0.0.1:8080
+}

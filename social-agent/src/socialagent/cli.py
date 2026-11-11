@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import shutil
 import sys
 from pathlib import Path
 from typing import Sequence
 
 import httpx
+import yaml
 
 from . import media as media_mod
 from .app import App, build_app
@@ -65,23 +67,40 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _setup_logging(verbose: bool) -> None:
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # httpx/httpcore log every request URL at INFO, and Telegram / Instagram URLs carry the bot or access token.
+    for noisy in ("httpx", "httpcore", "httpx2", "telegram"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def _setup_file_logging(settings: Settings) -> Path:
+    """A background service has no console: keep a rotating log next to the database."""
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.data_dir / "agent.log"
+    handler = logging.handlers.RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+    return path
+
+
 def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None, http: httpx.Client | None = None) -> int:
     args = _parser().parse_args(argv)
     load_dotenv(args.env_file)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _setup_logging(args.verbose)
     try:
         settings = Settings.from_env()
-    except ValueError as exc:
+        if args.cmd == "run":
+            _setup_file_logging(settings)
+            asyncio.run(run_forever(settings))
+            return 0
+        app = build_app(settings, PrintNotifier(), llm=llm, http=http)
+    except KeyboardInterrupt:
+        return 0
+    except (ValueError, yaml.YAMLError) as exc:  # bad .env / brand.yaml: say so plainly instead of a traceback
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
-    if args.cmd == "run":
-        try:
-            asyncio.run(run_forever(settings))
-        except KeyboardInterrupt:
-            pass
-        return 0
-
-    app = build_app(settings, PrintNotifier(), llm=llm, http=http)
     try:
         return _dispatch(args, app, settings, http or httpx.Client(timeout=30))
     except (LLMError, PublishError, media_mod.MediaError) as exc:

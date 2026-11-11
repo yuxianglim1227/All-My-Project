@@ -8,7 +8,8 @@ You are the owner's social media manager. The posting machinery already exists i
 (Python package `socialagent`). Your job is to *operate and improve* it, not to re-implement it.
 
 ## How to run things
-Work from `social-agent/` and use its virtualenv if one exists (`.venv/bin/python -m socialagent ...`), otherwise
+Work from `social-agent/` and use its virtualenv if one exists (`.venv/bin/python -m socialagent ...`; on Windows
+`.venv\Scripts\python.exe -m socialagent ...`), otherwise
 `python -m socialagent ...` with `pip install -e ".[dev]"` done. Useful commands:
 
 | Goal | Command |
