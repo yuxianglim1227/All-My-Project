@@ -98,6 +98,8 @@ or logged. Never paste keys into a chat, including with Claude.
 ## 3. Going live: setup guides
 
 ### 3.1 Telegram (how you talk to it)
+**Full walkthrough with troubleshooting: [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md).** The short version:
+
 1. In Telegram, message **@BotFather** → `/newbot` → choose a name, then a username ending in `bot` → copy the token.
    Optional hardening: send BotFather `/setjoingroups` and choose **Disable** so the bot cannot be added to groups.
 2. Run `python -m socialagent setup` (the Windows installer does this for you). Paste the token when asked (hidden); it is
