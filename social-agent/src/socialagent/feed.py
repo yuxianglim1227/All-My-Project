@@ -16,7 +16,7 @@ from .store import Store
 from .timeutil import parse_iso
 
 DEFAULT_WINDOWS = ["12:00", "19:00"]
-LIVE_STATUSES = ("scheduled", "pending_approval", "publishing", "published")
+LIVE_STATUSES = ("scheduled", "publishing", "published", "handed_off")
 
 
 def parse_hhmm(value: str) -> time:

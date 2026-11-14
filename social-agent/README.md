@@ -1,14 +1,20 @@
 # Social Agent: your Instagram + TikTok manager
 
-Send a photo or video from your phone with a few words of instruction. The agent looks at it, decides what to
-post and where, edits it, writes captions and hashtags, schedules it into the right slot, posts it, and tells you
-what happened. It also researches trends, keeps your feed balanced, and keeps your Highlights organised.
+Share a photo or video from your phone to a private Telegram bot. The agent looks at it, writes a caption in the
+**tone** (funny, just-describe, aesthetic…) and **language** (English / 中文 / both) you choose, and shows you a **draft
+card**. You tap to tweak, then **Approve**. It posts through the official APIs, or hands you a ready-to-post
+package. It also researches trends, keeps your feed balanced and keeps your Highlights organised.
+
+**Phase 1 (this version) = drafts.** Nothing is posted until you tap Approve, and your photos/videos are not
+creatively edited (only fixed where a platform would reject them). Editing is Phase 2. The full design, the agent's
+job description and the roadmap are in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ```
- phone ──► Telegram bot ─┐                                     ┌─► Instagram (photo/carousel/Reel/Story)
- (or iOS/Android         ├─► Claude plans ─► ffmpeg edits ─► scheduler ─┤
-  Shortcut → HTTP) ──────┘   (sees your media, trends,        (undo window,   └─► TikTok (video/photo/draft)
-                              brand voice, feed state)         approval gate)
+ phone ─► Telegram bot ─┐      ┌─ Understand (vision, once) ─┐
+ (or Shortcut → HTTP) ──┴─► DRAFT CARD ◄─ Write (text, per tone × language) ─┘
+                              │  tap: tone · language · where · rewrite · Approve
+                              ▼
+              Instagram API · TikTok API/inbox draft · or a manual package you post in 2 taps
 ```
 
 Everything defaults to **DRY RUN**: until you switch it off, nothing is ever posted.
@@ -23,10 +29,12 @@ Everything defaults to **DRY RUN**: until you switch it off, nothing is ever pos
 | Highlights | ❌ **Instagram has no API to create Highlights.** The agent tags every Story with a collection and sends you a checklist of exactly which Stories to tap into which Highlight (`/highlights`). |
 | Post to TikTok | ⚠️ Official Content Posting API. **Until TikTok audits your app, every direct post is forced private.** Alternative: `TIKTOK_MODE=inbox` uploads a *draft* you publish with one tap. |
 | Trending sounds | ❌ Can't be attached by any API. The agent names trends/formats and tells you when to add a sound in-app (or use TikTok inbox mode). |
-| Use CapCut / Jianying | ❌ No public API, and I can't drive your phone apps. ffmpeg does the editing headlessly (9:16 blur-fill, trims, hook text, Chinese text OK). **Optional, experimental:** if the agent runs on the same computer as desktop CapCut/Jianying it can write a draft project to open and polish. |
+| Edit with CapCut / Jianying | ❌ No public API, and I can't drive your phone apps. **Phase 1 does no creative editing** (the agent only suggests edits). Phase 2 adds ffmpeg editing you approve; an experimental draft export to desktop CapCut/Jianying exists for the same computer only. |
+| Drafts inside Instagram / TikTok | ⚠️ **TikTok: yes** (inbox draft you finish in the app). **Instagram: no draft API exists**, so the draft lives in the bot and, on Approve, is published by API or handed to you as a ready-to-post package. |
 | Research trends | ✅ Claude + web search once a day (incl. Douyin/Xiaohongshu signals that tend to reach TikTok/Reels first). |
 | "Refer to my TikTok / Douyin" | ✅ Via things you give it: links (`/inspo <link>`), **screenshots** (it reads Chinese text and extracts the format/hook), or your TikTok "Download your data" export. It does **not** log into your accounts or scrape: that risks bans and breaks the platforms' terms. |
-| Post while I'm out | ✅ The agent runs as an always-on service (see §3). A 2-minute **undo window** applies to "post now"; flagged content waits for your approval. |
+| Post while I'm out | ✅ The agent runs as an always-on service (see §3). Every draft waits for your **Approve** tap; "Now" still waits a 2-minute **undo window**; flagged content needs a second confirming tap. |
+| Start before any API setup | ✅ **Manual hand-off** works from the first message: at the scheduled time the bot sends the caption and steps, you post in the native app and tap “I posted it”. |
 
 ### Verification status (what I checked vs. what you must check on first run)
 
@@ -46,7 +54,9 @@ Everything defaults to **DRY RUN**: until you switch it off, nothing is ever pos
 | Dockerfile / compose | ⚠️ written, not built |
 | Windows behaviour (UTF-8 BOM / UTF-16 / CRLF config files, non-UTF-8 ffmpeg output, `FFMPEG_BIN`, Windows font paths, denied symlinks, no POSIX signals, tokens kept out of logs) | ✅ each simulated and covered by tests on Linux · ❌ **never run on real Windows** |
 | `deploy/windows/install.ps1`, the Caddy and scheduled-task steps, AWS security-group advice | ⚠️ written without a Windows machine: run `selfcheck` and read the script before trusting it |
-| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI | ✅ **230+ automated tests** (`python -m pytest -q`) |
+| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI | ✅ **325 automated tests** (`python -m pytest -q`) |
+| Draft flow with the real Telegram service (edit-in-place cards, callback timing, albums) | ❌ tested only against fakes and real `Update` objects: expect small fixes on first use |
+| Instagram has no draft endpoint; containers expire in 24 h | ✅ official docs via search (no draft state found) |
 
 **First-run discipline:** `selfcheck` → dry-run with a real photo → one *private* TikTok → one Story/post on a
 throwaway Instagram account → only then set `DRY_RUN=false` on your real accounts.
@@ -62,7 +72,7 @@ pip install -e ".[dev]"                 # add ,capcut for the experimental draft
 sudo apt install ffmpeg fonts-noto-cjk  # macOS: brew install ffmpeg   (fonts-noto-cjk = Chinese text)
 cp .env.example .env                    # then edit it: at minimum ANTHROPIC_API_KEY
 python -m socialagent selfcheck --claude
-python -m socialagent submit ~/Pictures/cafe.jpg -i "story only, food highlight"   # prints the plan, posts nothing
+python -m socialagent submit ~/Pictures/cafe.jpg -i "funny 中文, story only"          # creates a DRAFT and prints the card; posts nothing
 python -m pytest -q                     # optional: run the test-suite
 ```
 
@@ -147,25 +157,36 @@ gives a stable HTTPS address (needed for Instagram) and is required to verify th
 4. Leave `TIKTOK_PRIVACY=SELF_ONLY` until TikTok has audited the app (apply in the portal; timing varies: TikTok's app-review FAQ quotes several days to two weeks, third-party reports say longer). Until then use `TIKTOK_MODE=inbox` if you want to publish publicly yourself.
 
 ### 3.5 Switching on
-Run through `selfcheck`, then set `DRY_RUN=false`. Consider `REQUIRE_APPROVAL=true` for the first week: every plan
-then waits for your **✅ Approve** tap.
+Run through `selfcheck`, then set `DRY_RUN=false`. Every draft still needs your **✅ Approve** tap, which is the
+safety net for the first weeks. Until a platform's API credentials exist its method is **manual hand-off**
+(`/settings` shows and changes it), so you can use the bot today and add the developer apps later.
 
 ---
 
 ## 4. Using it
 
-**Send media (caption = instruction):**
-- (photo) `story only, travel highlight`
-- (video) `post tonight at 8pm, funny tone, 抖音 style hook`
-- (3 photos) `carousel, caption: Sunday reset`
-- (video) `TikTok only, cut the first 3 seconds`
-- no instruction at all → the agent decides platform, format, caption and timing
+**The flow.** Share photos/videos to the bot (gallery → Share → Telegram → your bot, or attach in the chat). It answers at
+once, then **turns that same message into a draft card**: what it saw, a caption per place (IG post / IG Story / TikTok),
+hashtags and a suggested time. Buttons on the card:
 
-Albums and "photo, then a text a few seconds later" become one submission. For full quality send photos/videos as **File** (Telegram compresses normal photos). You get the plan back with
-**Cancel / Approve** buttons and the post ids.
+- **Tone:** 😂 Funny · 📝 Describe · ✨ Aesthetic · 📖 Story · 💡 Tips · 🔥 Hype (add your own in `brand.yaml`)
+- **Language:** EN · 简体 · 繁體 · EN+中
+- **Where:** ☑ IG post / ☐ IG story / ☐ TikTok (everything the media can go to)
+- 🔄 Rewrite · ✏️ My caption (your exact words) · 💬 Change… (tell me what to change)
+- ✅ **Approve** (next free slot) · ⚡ **Now** (after the 2-minute undo window) · 🗑 Discard
 
-**Telegram commands:** `/queue` `/trends` (`/trends refresh`) `/review` `/highlights` `/highlights_done [name]`
-`/cancel <id>` `/approve <id>` `/retry <id>` `/inspo <link> [note]` `/status`. Any other text is answered as chat.
+Changing tone or language only re-runs the text writer (it does not re-read your photos), so taps are quick. You can
+also **reply to the card** with a change (“shorter, mention Sunday”), or start the reply with `=` to use your own caption.
+After Approve the card becomes a confirmation with ✖ Cancel buttons.
+
+**Type hints in the caption** to skip taps: `funny 中文`, `story only, travel highlight`, `post tonight at 8pm`,
+`TikTok only`, `bilingual`. No caption at all: the agent uses your defaults (`/settings`) and decides the rest.
+
+Albums and "photo, then a text a few seconds later" become one submission. For full quality send photos/videos as
+**File** (Telegram compresses normal photos).
+
+**Telegram commands:** `/drafts` `/draft <id>` `/settings` `/queue` `/trends` (`/trends refresh`) `/review` `/highlights`
+`/highlights_done [name]` `/cancel <id>` `/retry <id>` `/inspo <link> [note]` `/status`. Any other text is answered as chat.
 
 **Inspiration:** send a screenshot with the caption `inspo` (works for Douyin / Xiaohongshu, Chinese text is
 translated), `/inspo <TikTok link>`, or your TikTok data export file with the caption `inspo export`.
@@ -181,24 +202,24 @@ curl -H "Authorization: Bearer $API_TOKEN" -F "file=@clip.mp4" -F "instruction=T
 (or set `TELEGRAM_API_BASE` to a local Bot API server, see `docker-compose.yml`).
 
 **Managing it with Claude Code:** `.claude/agents/social-media-manager.md` defines the manager agent, which drives
-the same CLI (`submit`, `queue`, `trends`, `review`, `selfcheck`, …) and edits `brand.yaml` on your behalf.
+the same CLI (`submit`, `drafts`, `draft <id> --tone funny --lang zh --approve`, `queue`, `trends`, `review`, `selfcheck`, …) and edits `brand.yaml` on your behalf.
 
 ---
 
 ## 5. How it organises your feed
 
-- **Content pillars:** each piece is tagged with a pillar from `brand.yaml`; the planner is told which pillars are
+- **Content pillars:** each piece is tagged with a pillar from `brand.yaml`; the Understand step is told which pillars are
   under-represented and varies formats so the grid doesn't repeat itself.
 - **Slots:** posts go into your posting windows, respecting a minimum gap and a daily cap per platform. Stories go out
   soon after approval; "post now" waits the undo window.
-- **Per-platform voice:** native captions, not copy-paste; bilingual if `languages` says so.
+- **Per-platform voice:** native captions, not copy-paste, in the tone × language you picked.
 - **Highlights:** Stories are tagged to a collection; the weekly review (Sunday evening) and `/highlights` list what to add.
-- **Trends:** refreshed daily; used only when they genuinely fit, and named in the plan so you can see why.
+- **Trends:** refreshed daily; used only when they genuinely fit, and named on the draft so you can see why.
 
 ## 6. Safety design
 
-DRY_RUN default · owner-only bot · undo window · optional approval + automatic approval for risk flags
-(minors, other people, copyright, location, sensitive…) · atomic claim so a post can never publish twice ·
+DRY_RUN default · owner-only bot · **nothing is scheduled before you tap Approve** · a second confirming tap for risk
+flags (minors, other people, copyright, location, sensitive…) · undo window · atomic claim so a post can never publish twice ·
 **no automatic retry after an ambiguous failure** (could double-post) · crash recovery marks interrupted posts for review ·
 Claude only *proposes*, plain code validates what each API can publish · web/trend/inspiration text is treated as
 untrusted data · secrets and data are git-ignored · official APIs only.
@@ -223,6 +244,7 @@ model (`claude-opus-5-5`); set `CLAUDE_MODEL=claude-sonnet-5-5` to roughly halve
 Trend research runs once a day. Nothing else leaves your machine except what you publish.
 
 ## 9. Layout
-`src/socialagent/`: `brain.py` (planner + validation) · `llm.py` (Claude wrapper) · `trends.py` · `media.py`
-(ffmpeg) · `feed.py` (slots, balance, Highlights) · `pipeline.py` (orchestration + safety) · `scheduler.py` ·
-`publishers/` (instagram, tiktok, dry-run) · `channels/` (telegram, http) · `capcut.py` · `cli.py` · `tests/`.
+`src/socialagent/`: `drafts.py` (draft lifecycle + cards) · `brain.py` (Understander, Writer, guardrails) · `styles.py`
+(tone × language) · `prefs.py` · `cards.py` · `llm.py` (Claude wrapper) · `trends.py` · `media.py` (ffmpeg) · `feed.py`
+(slots, balance, Highlights) · `pipeline.py` (schedule, publish, retry, recover) · `scheduler.py` · `publishers/`
+(instagram, tiktok, manual, dry-run) · `channels/` (telegram, http) · `capcut.py` · `cli.py` · `tests/` · `docs/ARCHITECTURE.md`.

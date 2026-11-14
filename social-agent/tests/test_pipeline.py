@@ -5,44 +5,45 @@ from datetime import timedelta
 from conftest import needs_ffmpeg
 from helpers import ScriptedPublisher, fatal, make_rig, one_post, retryable, set_plan, T0
 from socialagent import media
-from socialagent.llm import LLMError
 from socialagent.media import MediaError
-from socialagent.models import FAILED, PENDING_APPROVAL, PUBLISHED, PUBLISHING, SCHEDULED
+from socialagent.models import FAILED, PUBLISHED, PUBLISHING, SCHEDULED
 from socialagent.publishers import DryRunPublisher
 from socialagent.timeutil import iso
 
 pytestmark = needs_ffmpeg
 
 
-def post_of(rig, sid=None):
+def post_of(rig, did=None):
     posts = rig.store.list_posts(limit=100)
-    return posts if sid is None else [p for p in posts if p["submission_id"] == sid]
+    if did is None:
+        return posts
+    sub = rig.store.get_draft(did)["submission_id"]
+    return [p for p in posts if p["submission_id"] == sub]
 
 
 # ---------------------------------------------------------------- planning & scheduling
 def test_photo_is_prepared_scheduled_in_next_window_and_reported(media_dir, tmp_path):
     rig = make_rig(tmp_path, publishers={"instagram": DryRunPublisher("instagram"), "tiktok": DryRunPublisher("tiktok")})
     set_plan(rig.llm, one_post())
-    sid = rig.pipeline.submit([media_dir / "photo.jpg"], "nice coffee", source="test")
-    (p,) = post_of(rig, sid)
+    did = rig.submit([media_dir / "photo.jpg"], "nice coffee")
+    (p,) = post_of(rig, did)
     assert p["status"] == SCHEDULED and p["platform"] == "instagram" and p["kind"] == "photo"
     assert p["publish_at"] == iso(T0.replace(hour=12, minute=30))                 # next IG window after 10:00
     assert p["caption"] == "Coffee o'clock\n\n#coffee"
     prepared = media.probe(p["media"][0]["path"])
     assert (prepared.kind, prepared.width, prepared.height) == ("image", 1000, 1000)
 
-    first, plan_msg = rig.notifier.messages[0][0], rig.notifier.messages[1]
-    assert "Got 1 photo" in first
-    text, actions = plan_msg
-    assert "DRY RUN" in text and f"[{p['id']}]" in text and "Wed 11 Nov 12:30" in text
-    assert actions == [("✖ Cancel #1", f"cancel:{p['id']}")]
-    assert rig.store.get_submission(sid)["status"] == "scheduled"
+    card = rig.notifier.last_card                                                    # the approved card replaces the draft card
+    assert card.kind == "post" and "dry run - nothing will really be posted" in card.text
+    assert f"[{p['id']}]" in card.text and "Wed 11 Nov 12:30" in card.text
+    assert [b.action for b in card.rows[0]] == [f"cancel:{p['id']}"]
+    assert rig.store.get_draft(did)["state"] == "approved"
 
 
 def test_nothing_publishes_early_and_post_now_waits_for_the_undo_window(media_dir, tmp_path):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post(when="now"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     (p,) = post_of(rig)
     assert p["publish_at"] == iso(T0 + timedelta(seconds=120))
     assert rig.pipeline.tick(T0 + timedelta(seconds=119)) == 0 and rig.publishers["instagram"].requests == []
@@ -52,17 +53,16 @@ def test_nothing_publishes_early_and_post_now_waits_for_the_undo_window(media_di
     assert rig.pipeline.tick(T0 + timedelta(days=1)) == 0                           # never published twice
 
 
-def test_video_cross_post_creates_vertical_reel_and_tiktok(media_dir, tmp_path):
-    rig = make_rig(tmp_path)
+def test_video_cross_post_schedules_reel_and_tiktok_in_their_own_windows(media_dir, tmp_path):
+    rig = make_rig(tmp_path, env={"EDIT_LEVEL": "fit"})
     set_plan(rig.llm, one_post("instagram", "reel", caption="Reel", on_screen_text="Wait for it"),
-             one_post("tiktok", "video", caption="TikTok", hashtags=["#fyp"], trim_start=1, trim_end=3))
-    rig.pipeline.submit([media_dir / "landscape.mp4"], "post everywhere")
+             one_post("tiktok", "video", caption="TikTok", hashtags=["#fyp"]))
+    rig.submit([media_dir / "landscape.mp4"], "post everywhere")
     ig, tt = sorted(post_of(rig), key=lambda p: p["platform"])
     assert ig["publish_at"] == iso(T0.replace(hour=12, minute=30)) and tt["publish_at"] == iso(T0.replace(hour=18))
     for p in (ig, tt):
         m = media.probe(p["media"][0]["path"])
         assert (m.kind, m.width, m.height) == ("video", 1080, 1920) and p["media"][0]["duration"] > 0
-    assert 1.7 < tt["media"][0]["duration"] < 2.4                                    # trimmed 1s..3s
     assert tt["caption"] == "TikTok #fyp" and ig["caption"] == "Reel\n\n#coffee"   # IG: tags after a blank line; TikTok: inline
 
 
@@ -70,7 +70,7 @@ def test_slots_do_not_collide_across_submissions(media_dir, tmp_path):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post())
     for _ in range(3):
-        rig.pipeline.submit([media_dir / "photo.jpg"])
+        rig.submit([media_dir / "photo.jpg"])
     times = sorted(p["publish_at"] for p in post_of(rig))
     assert times == [iso(T0.replace(hour=12, minute=30)), iso(T0.replace(hour=19, minute=30)),
                      iso((T0 + timedelta(days=1)).replace(hour=12, minute=30))]
@@ -79,20 +79,21 @@ def test_slots_do_not_collide_across_submissions(media_dir, tmp_path):
 def test_explicit_time_honoured_and_past_time_falls_back_with_note(media_dir, tmp_path):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post(when="2026-11-12T19:00"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     assert post_of(rig)[0]["publish_at"] == iso(T0.replace(day=12, hour=19))
     set_plan(rig.llm, one_post(when="2026-11-10T09:00"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
-    assert any("had already passed" in t for t in rig.notifier.texts)
+    rig.submit([media_dir / "photo.jpg"])
+    assert "had already passed" in rig.notifier.last_card.text
 
 
 def test_story_goes_out_soon_and_feeds_the_highlight_checklist(media_dir, tmp_path):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post(kind="story", highlight="travel", on_screen_text="Tokyo!"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     (p,) = post_of(rig)
-    assert p["publish_at"] == iso(T0 + timedelta(seconds=120)) and p["caption"] == "" and p["highlight"] == "Travel"
-    assert media.probe(p["media"][0]["path"]).height == 1920
+    assert p["publish_at"] == iso(T0 + timedelta(seconds=120)) and p["highlight"] == "Travel"
+    assert p["caption"] == "Tokyo!"                                                  # Stories: the field carries the suggested text sticker
+    assert media.probe(p["media"][0]["path"]).kind == "image"
     rig.pipeline.tick(T0 + timedelta(minutes=5))
     pending = rig.store.pending_highlights()
     assert [h["collection"] for h in pending] == ["Travel"]
@@ -103,80 +104,24 @@ def test_story_goes_out_soon_and_feeds_the_highlight_checklist(media_dir, tmp_pa
 def test_prepare_failure_for_one_post_does_not_block_the_others(media_dir, tmp_path, monkeypatch):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post("instagram", "reel"), one_post("tiktok", "video"))
-    real = media.prepare_video
+    real = media.compliant_video
 
     def flaky(src, dst, **kw):
         if "tiktok" in str(dst):
             raise MediaError("boom")
         return real(src, dst, **kw)
 
-    monkeypatch.setattr(media, "prepare_video", flaky)
-    rig.pipeline.submit([media_dir / "landscape.mp4"])
+    monkeypatch.setattr(media, "compliant_video", flaky)
+    rig.submit([media_dir / "landscape.mp4"])
     assert [p["platform"] for p in post_of(rig)] == ["instagram"]
-    assert any("Couldn't prepare the tiktok video" in t for t in rig.notifier.texts)
-
-
-def test_everything_failing_reports_and_marks_submission_failed(media_dir, tmp_path, monkeypatch):
-    rig = make_rig(tmp_path)
-    set_plan(rig.llm, one_post())
-    monkeypatch.setattr(media, "prepare_feed_image", lambda *a, **k: (_ for _ in ()).throw(MediaError("bad image")))
-    sid = rig.pipeline.submit([media_dir / "photo.jpg"])
-    assert rig.store.get_submission(sid)["status"] == "failed" and post_of(rig) == []
-    assert any("couldn't plan this one" in t and "bad image" in t for t in rig.notifier.texts)
-
-
-def test_claude_failure_and_unreadable_file_are_reported_not_raised(media_dir, tmp_path, monkeypatch):
-    rig = make_rig(tmp_path)
-
-    def boom(**kw):
-        raise LLMError("Claude is rate-limiting me right now; try again in a minute.")
-
-    monkeypatch.setattr(rig.llm, "json", boom)
-    sid = rig.pipeline.submit([media_dir / "photo.jpg"])
-    assert rig.store.get_submission(sid)["status"] == "failed"
-    assert "rate-limiting" in rig.notifier.texts[-1] and post_of(rig) == []
-
-    assert rig.pipeline.submit([media_dir / "notes.txt"]) is None
-    assert "couldn't read that file" in rig.notifier.texts[-1]
-    assert rig.pipeline.submit([]) is None
-
-
-def test_unexpected_error_during_planning_is_reported(media_dir, tmp_path, monkeypatch):
-    rig = make_rig(tmp_path)
-    monkeypatch.setattr(rig.pipeline.planner, "plan", lambda *a, **k: (_ for _ in ()).throw(KeyError("oops")))
-    sid = rig.pipeline.submit([media_dir / "photo.jpg"])
-    assert rig.store.get_submission(sid)["status"] == "failed" and "KeyError" in rig.notifier.texts[-1]
+    assert "Couldn't prepare the tiktok video" in rig.notifier.last_card.text
 
 
 # ---------------------------------------------------------------- approval / cancel / risk
-def test_approval_mode_parks_posts_until_approved(media_dir, tmp_path):
-    rig = make_rig(tmp_path, env={"REQUIRE_APPROVAL": "true"})
-    set_plan(rig.llm, one_post(when="now"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
-    (p,) = post_of(rig)
-    assert p["status"] == PENDING_APPROVAL
-    text, actions = rig.notifier.messages[-1]
-    assert ("✅ Approve #1", f"approve:{p['id']}") in actions and "Waiting for your OK" in text
-    assert rig.pipeline.tick(T0 + timedelta(days=2)) == 0                           # due long ago, still parked
-    rig.clock.now = T0 + timedelta(days=2)
-    assert rig.pipeline.approve(p["id"]) is True
-    assert rig.pipeline.approve(p["id"]) is False                                   # not approvable twice
-    assert rig.pipeline.tick(T0 + timedelta(days=2, seconds=30)) == 1
-    assert rig.store.get_post(p["id"])["status"] == PUBLISHED
-
-
-def test_risk_flags_force_approval_even_when_auto(media_dir, tmp_path):
-    rig = make_rig(tmp_path)
-    set_plan(rig.llm, one_post(), risk_flags=["identifiable_minor"])
-    rig.pipeline.submit([media_dir / "photo.jpg"])
-    assert post_of(rig)[0]["status"] == PENDING_APPROVAL
-    assert "flagged identifiable_minor" in rig.notifier.texts[-1]
-
-
 def test_cancel_before_publish_wins_and_cannot_cancel_after(media_dir, tmp_path):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post(when="now"), one_post("tiktok", "photo", when="now"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     by_platform = {p["platform"]: p for p in post_of(rig)}
     a, b = by_platform["instagram"], by_platform["tiktok"]
     assert rig.pipeline.cancel(a["id"]) is True
@@ -189,7 +134,7 @@ def test_cancel_before_publish_wins_and_cannot_cancel_after(media_dir, tmp_path)
 # ---------------------------------------------------------------- publishing, retries, safety
 def _single(rig, media_dir, **post):
     set_plan(rig.llm, one_post(when="now", **post))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     return post_of(rig)[0]["id"]
 
 
@@ -301,7 +246,7 @@ def test_brand_file_is_hot_reloaded(media_dir, tmp_path):
     f.write_text(f.read_text().replace('account_name: "My Account"', 'account_name: "Renamed Brand"'))
     import os
     os.utime(f, (time.time() + 5, time.time() + 5))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     assert rig.pipeline.brand.account_name == "Renamed Brand"
     assert "Renamed Brand" in rig.llm.calls[-1]["system"]
 
@@ -313,25 +258,30 @@ def test_draft_maker_is_optional_and_failures_never_block_posting(media_dir, tmp
         calls.append((pp.kind, len(clips)))
         return "Draft ready"
 
-    rig = make_rig(tmp_path, draft_maker=maker)
+    rig = make_rig(tmp_path, env={"EDIT_LEVEL": "creative"}, draft_maker=maker)
     set_plan(rig.llm, one_post("instagram", "reel"))
-    rig.pipeline.submit([media_dir / "landscape.mp4"])
-    assert calls == [("reel", 1)] and "Draft ready" in rig.notifier.texts[-1]
+    rig.submit([media_dir / "landscape.mp4"])
+    assert calls == [("reel", 1)] and "Draft ready" in rig.notifier.last_card.text
 
     def bad(*a):
         raise RuntimeError("no jianying")
 
-    rig2 = make_rig(tmp_path / "b", draft_maker=bad)
+    rig2 = make_rig(tmp_path / "b", env={"EDIT_LEVEL": "creative"}, draft_maker=bad)
     set_plan(rig2.llm, one_post("instagram", "reel"))
-    rig2.pipeline.submit([media_dir / "landscape.mp4"])
-    assert len(post_of(rig2)) == 1 and "draft skipped: no jianying" in rig2.notifier.texts[-1]
+    rig2.submit([media_dir / "landscape.mp4"])
+    assert len(post_of(rig2)) == 1 and "draft skipped: no jianying" in rig2.notifier.last_card.text
+
+    rig3 = make_rig(tmp_path / "c", draft_maker=maker)                              # Phase 1 (EDIT_LEVEL=none): the hook is not used
+    set_plan(rig3.llm, one_post("instagram", "reel"))
+    rig3.submit([media_dir / "landscape.mp4"])
+    assert calls == [("reel", 1)]
 
 
 def test_queue_review_and_chat_use_real_state(media_dir, tmp_path):
     rig = make_rig(tmp_path)
     assert "Nothing queued" in rig.pipeline.queue_text()
     set_plan(rig.llm, one_post())
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     q = rig.pipeline.queue_text()
     assert "instagram photo" in q and "Coffee o'clock" in q
     rig.llm.text_result = "Post more Reels."

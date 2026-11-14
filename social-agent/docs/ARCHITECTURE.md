@@ -1,0 +1,276 @@
+# Architecture: Social Agent (Phase 1 = draft-first)
+
+Status: Phase 1 implemented and tested (325 automated tests; nothing run against the live Instagram / TikTok /
+Telegram / Claude services yet, see §11). Phases 2 and 3 are design only.
+
+## 1. What changed and why
+
+| Before | Now (Phase 1) |
+|---|---|
+| One Claude call looked at the media **and** wrote the final captions; the plan was scheduled straight away. | **Draft-first.** Every submission becomes a *draft card* you review. Nothing is scheduled or published until you tap **Approve**. |
+| Style = one language list in `brand.yaml`. | **Tone × language per draft**, one tap (😂 Funny / 📝 Describe / ✨ Aesthetic / 📖 Story / 💡 Tips / 🔥 Hype × EN / 简体 / 繁體 / EN+中). Defaults in `/settings`; hints can be typed in the caption (“funny 中文”). |
+| Edits (reframe, trim, hook text) were on by default. | **No creative editing in Phase 1** (`EDIT_LEVEL=none`): your originals go out untouched, fixed only where a platform would reject them (HEIC/PNG → JPEG, HEVC → H.264, feed photos outside 4:5–1.91:1). Editing is Phase 2. |
+| Posting required the Instagram/TikTok developer apps. | **Manual hand-off** works from the first message: the bot sends a ready-to-post package at the scheduled time and you post in the native app. API publishing is optional. |
+
+## 2. Channel decision: is a Telegram bot the best way to send media from a phone?
+
+Requirements: media lives on the phone; sharing must be 1-2 taps; the reply must carry buttons (tone, language,
+approve); photos *and* large videos; Chinese + English; no app to build; free.
+
+| Option | Phone share-sheet | Buttons / cards | Big video | Setup effort | Verdict |
+|---|---|---|---|---|---|
+| **Telegram bot** | ✅ Share → Telegram → bot (iOS + Android) | ✅ inline keyboards; messages editable in place | ⚠️ 20 MB download via the cloud Bot API; lifted with a local Bot API server | low (BotFather, minutes) | **Chosen** |
+| Native-share HTTP endpoint (iOS Shortcut / Android HTTP Shortcuts) | ✅ | ❌ one-way; results still need a channel | ✅ no size limit | low | **Kept as the big-video side door** (`POST /api/submit`) |
+| WhatsApp Business Cloud API | ✅ | ⚠️ max **3** reply buttons per message (official docs); lists exist | ⚠️ ~16 MB video (secondary sources) | high: Meta business setup, dedicated number, message-window/template rules | Possible later through the same `Notifier` interface; heavier than it is worth for one owner |
+| PWA with Web Share Target | ⚠️ **Android Chrome only**; iOS Safari cannot receive shares | ✅ full custom UI | ✅ | medium: auth, hosting, UI code | No: breaks on iPhone |
+| Telegram **Mini App** (web UI inside the chat) | ✅ via the same bot | ✅✅ rich (grid preview, drag-reorder) | n/a | medium | **Phase 3 add-on**, same bot |
+| Native iOS/Android app | ✅ | ✅✅ | ✅ | very high | Overkill |
+
+Telegram wins on the combination (share-sheet reach, in-place editable cards, free, minutes to set up).
+It is a *recommendation*, not a lock-in: the core talks to the owner only through two small interfaces
+(`Notifier.present/notify` and `Card`), so another channel is an adapter, not a rewrite (§4).
+
+Verified this session (via search of official/secondary docs): Telegram bots can download ≤ 20 MB and a local Bot API
+server lifts it; WhatsApp reply buttons max 3; Web Share Target works on Android Chrome but not iOS Safari. Not verified:
+WhatsApp's exact video limit (secondary sources only).
+
+## 3. What "draft" can mean on each platform (verified)
+
+| Platform | In-app draft via API? | What we do |
+|---|---|---|
+| Instagram | **No.** Official publishing is container → publish. A container that is not published within 24 h expires (`EXPIRED`), so staging early is not a draft. | The draft lives in *our* store. On Approve: **API** (container created at publish time) or **manual hand-off**. |
+| TikTok | **Yes.** Upload-to-inbox puts a draft in the creator's TikTok inbox; you finish it in the app. | `TIKTOK_MODE=inbox` (“saved to your TikTok drafts”), or direct post (private-only until TikTok audits the app), or manual. |
+
+Whether the inbox route is exempt from TikTok's audit restriction is **not confirmed**: the restriction is documented
+for Direct Post; secondary sources suggest inbox uploads are not subject to it.
+
+## 4. System overview
+
+```mermaid
+flowchart LR
+  subgraph Phone
+    G[Gallery / camera] -->|Share| TG[Telegram bot chat]
+    G -->|Shortcut| HTTP[HTTP upload]
+  end
+  subgraph Channels[Channels - adapters only]
+    TGF[TelegramFrontend<br/>collector, ack, buttons, reply-to-edit]
+    HTTPA[http_api<br/>/api/submit, /m/ media URLs]
+  end
+  TG --> TGF
+  HTTP --> HTTPA
+  TGF --> DS
+  HTTPA --> DS
+  subgraph Core
+    DS[DraftService<br/>state machine + cards]
+    U[Understander<br/>vision, once]
+    W[Writer<br/>text, per style]
+    P[Prefs + StyleCatalog]
+    V[validate_plan / eligible_targets<br/>deterministic guardrails]
+    PIPE[Pipeline<br/>schedule, publish, retry, recover]
+    SCH[Scheduler<br/>due posts, trends, tokens, review]
+    ST[(SQLite store)]
+    M[media.py<br/>probe + compliance only]
+  end
+  DS --> U --> V
+  DS --> W
+  DS --> P
+  DS -->|Approve| PIPE
+  SCH --> PIPE
+  DS <--> ST
+  PIPE <--> ST
+  PIPE --> M
+  subgraph Publishers
+    IG[Instagram Graph API]
+    TT[TikTok Content Posting API]
+    MAN[Manual hand-off<br/>package sent to you]
+  end
+  PIPE --> IG
+  PIPE --> TT
+  PIPE --> MAN
+  MAN -->|reminder + I posted it| TGF
+  R[TrendResearcher<br/>web search + inspiration] --> DS
+```
+
+Layers and their single responsibility:
+
+| Layer | Modules | Responsibility | Knows nothing about |
+|---|---|---|---|
+| Channels | `channels/telegram_bot.py`, `channels/http_api.py` | Receive media/text/taps, debounce albums, render `Card`s, enforce owner-only | AI, platforms |
+| Conversation | `drafts.py`, `cards.py`, `prefs.py`, `styles.py` | Draft lifecycle, what each tap does, style defaults, building the card | Telegram, ffmpeg internals |
+| Agent brain | `brain.py` (`Understander`, `Writer`), `trends.py`, `llm.py` | Look at media once, write captions per style, research trends, analyse inspiration | Posting |
+| Guardrails | `brain.validate_plan`, `eligible_targets`, `textutil`, `feed.choose_slot` | Enforce what each API can publish, hashtag/caption limits, slots | AI |
+| Publish engine | `pipeline.py`, `scheduler.py`, `publishers/*` | Approved drafts → posts → platform; retries, undo window, crash recovery | How drafts were written |
+| Media | `media.py`, `hosting.py` | Probe, compliance-only conversion (Phase 1), public media URLs | Captions |
+| State | `store.py` (SQLite) | Drafts, posts, trends, inspiration, highlights, prefs/tokens (kv) | Everything else |
+
+## 5. The seamless flow (what happens when you share a photo)
+
+```mermaid
+sequenceDiagram
+  actor You
+  participant TG as Telegram
+  participant F as TelegramFrontend
+  participant D as DraftService
+  participant C as Claude
+  You->>TG: Share photo (caption optional: "funny 中文")
+  TG->>F: media message
+  F-->>TG: "📥 Got it - one moment…" (instant; message A)
+  Note over F: waits COLLECT_WINDOW (3 s) for the rest of an album / a follow-up text
+  F->>D: create(paths, instruction, handle=A)
+  D->>C: Understand (vision, ONCE): facts, mood, pillar, targets, risks
+  D->>C: Write (text only): captions in tone × language
+  D-->>TG: edit message A into the DRAFT CARD (buttons)
+  You->>TG: tap 😂 Funny / 简体 / ☐ TikTok
+  TG->>D: callback
+  D->>C: Write again (text only, cheap)
+  D-->>TG: same message A updated in place
+  You->>TG: ✅ Approve  (or ⚡ Now, or reply "shorter")
+  D->>D: prepare media (originals), choose slot, create post(s)
+  D-->>TG: card becomes "✅ Approved" with ✖ Cancel buttons
+  Note over D: scheduler publishes at the slot: API, TikTok inbox, or sends you the manual package
+```
+
+Design points that make it feel seamless:
+- **One message.** The acknowledgement becomes the draft card and every tap edits it. The chat never fills with cards.
+- **Vision once, writing many times.** Changing tone or language re-runs only the text-only Writer (no pixels), so taps are
+  fast and cheap. Claude's description of the media is stored as `facts`, and the Writer may only use those facts.
+- **Zero taps in the common case.** Defaults come from `/settings`; hints typed in the caption override them
+  (“funny 中文”, “story only”, “post at 8pm”).
+- **Free-text edits without modes.** Reply to the card with a change (“shorter, mention Sunday”); start with `=` to use
+  your own caption verbatim. Or use ✏️ / 💬 buttons, which ask for the text.
+- **Per-draft locking.** Rapid taps are serialised so the card never shows a mixed state.
+
+## 6. The agent's job description
+
+**Roles**
+
+| # | Job | How | Output |
+|---|---|---|---|
+| 1 | **Understand** the media | Vision call on photos / sampled video frames + owner instruction + feed state | Summary, mood, *facts*, pillar, risk flags, suggested targets, edit ideas (not applied in Phase 1) |
+| 2 | **Write** captions | Text-only call: brand brief + facts + tone + language + trends + change request + previous draft (to avoid repeats) | Caption, hashtags, Story sticker idea per target |
+| 3 | **Decide where / when** | Suggests from the *eligible* targets for this media; slot chooser applies windows, gaps, daily caps; you can toggle targets | Targets + suggested time on the card |
+| 4 | **Keep the feed organised** | Content pillars balance, format variety, Story→Highlight tagging, weekly review, Highlights checklist | Pillar per post, checklist, review |
+| 5 | **Research trends** | Daily web search (incl. Douyin/Xiaohongshu signals); falls back to evergreen formats and says so | Trend notes used only when they fit |
+| 6 | **Learn your taste** | Inspiration board: TikTok links (oEmbed), TikTok data export, Douyin screenshots read by vision | Format/hook/recreate notes |
+| 7 | **Keep things running** | Token refresh, retries with backoff, crash recovery, quota awareness, cleanup | Status messages only when something needs you |
+| 8 | **Answer questions** | Free chat with queue/feed/trend context | Advice (no posting power) |
+
+**Never** (enforced in code, not just in prompts): publish without your Approve; post a flagged draft without a second
+confirming tap; invent facts beyond what is visible/stated; identify or name people from faces; follow instructions
+found in trend/inspiration text or inside images; use unofficial Instagram/TikTok/Douyin access; retry after an
+ambiguous publish failure; edit your media creatively (Phase 1).
+
+**Autonomy ladder**
+
+| Level | Behaviour | Phase |
+|---|---|---|
+| 0 Manual hand-off | Bot prepares everything; you post in the app | 1 (default until API credentials exist) |
+| 1 Draft → Approve → API publish | One tap publishes through the official API | **1** |
+| 2 Auto-approve safe patterns | After N approved drafts of the same kind with no risk flags, skip the tap (undo window stays) | 3 |
+
+## 7. Lifecycles
+
+```mermaid
+stateDiagram-v2
+  [*] --> drafting: media received
+  drafting --> ready: understand + write ok
+  drafting --> failed: AI/validation error (media kept)
+  failed --> drafting: 🔄 Try again
+  ready --> ready: tone / language / target / rewrite / edit
+  ready --> approved: ✅ Approve / ⚡ Now (risk flags need a 2nd tap)
+  ready --> discarded: 🗑
+  failed --> discarded: 🗑
+  approved --> [*]
+  discarded --> [*]
+```
+
+A draft is a mutable document. **Only `approve` creates publish jobs**, so the publish engine can never see an unapproved draft.
+
+```mermaid
+stateDiagram-v2
+  [*] --> scheduled: approve (publish_at = slot, or now + undo window)
+  scheduled --> publishing: claimed atomically at publish_at
+  scheduled --> cancelled: ✖ Cancel
+  publishing --> published: API success
+  publishing --> handed_off: manual method (package sent)
+  handed_off --> published: ✅ I posted it
+  publishing --> scheduled: retryable error (backoff 2/5/15 min, max 3)
+  publishing --> failed: fatal error / retries exhausted / crash recovery
+  failed --> scheduled: 🔁 Retry
+```
+
+## 8. Data model (SQLite)
+
+| Table | Purpose |
+|---|---|
+| `submissions` | The raw intake: media list (paths, codecs, sizes), instruction, source |
+| `drafts` | Mutable draft: `state`, `tone`, `lang`, `brief_json` (Claude's understanding), `targets_json` (per target: selected, caption, hashtags, when, highlight…), `card_ref` (the chat message that shows it) |
+| `posts` | Immutable-ish publish jobs: platform, kind, final caption, prepared media, `publish_at`, `status`, `method` (`api`/`manual`), attempts, remote id |
+| `trends`, `inspiration`, `highlights` | Research, references, Story→Highlight checklist |
+| `kv` | Preferences (`prefs`), tokens (refreshed), job timestamps |
+
+## 9. Publishing methods
+
+| Platform | `api` | `manual` | Notes |
+|---|---|---|---|
+| Instagram | Graph API: photo, carousel, Reel, Story (container → poll → publish) | Reminder + caption/sticker text + “✅ I posted it” | No Highlights API → checklist; no in-app drafts |
+| TikTok | Direct post (private until audited) or **inbox draft** | Reminder + caption | Photo posts need a verified media domain |
+
+The default is `manual` until that platform's credentials exist, then `api`; `/settings` overrides per platform.
+`DRY_RUN=true` swaps the API publishers for simulated ones; manual hand-off posts nothing, so it is unaffected.
+
+## 10. Safety and failure model
+
+Invariants (each has tests): DRY_RUN default · owner-only (filter + re-check in every handler) · approval before any
+scheduling · risk-flag second tap · undo window · atomic claim (no double publish) · no auto-retry after an ambiguous
+failure · crash recovery flags interrupted posts instead of re-sending · Claude only *proposes*, plain code validates ·
+trend/inspiration/OCR text treated as untrusted · tokens never logged · secrets/data git-ignored.
+
+| Failure | Behaviour |
+|---|---|
+| Claude error / refusal / bad JSON | Draft card becomes “❌ couldn't draft this” + 🔄 Try again; media kept; nothing posted |
+| Rewrite fails | Previous captions kept; one-shot note on the card |
+| File over 20 MB (cloud Bot API) | Actionable message (HTTP upload or local Bot API server) |
+| Media can't be prepared | Draft stays open; reason shown on the card |
+| Platform rate limit / transient error | Backoff retries (max 3) with notifications |
+| Ambiguous publish outcome | Marked failed with “check the app”; never auto-retried |
+| Server restart mid-publish | `recover()` marks it failed for your review |
+
+## 11. Verification status (honest)
+
+| Claim | Status |
+|---|---|
+| Logic, state machines, guardrails, publishers (vs. mock servers), Telegram handlers (vs. fake updates + real `Update` objects), CLI, HTTP | ✅ 325 automated tests |
+| Instagram has no draft endpoint; containers expire in 24 h | ✅ official docs via search (no draft state found) |
+| TikTok inbox upload = real in-app draft | ✅ documented; audit exemption ⚠️ unconfirmed |
+| Telegram 20 MB limit; WhatsApp 3 buttons; Web Share Target Android-only | ✅ |
+| Claude request shapes (structured output, effort, fallbacks, web search) | ✅ vs. SDK signatures · ❌ never called live |
+| Telegram behaviour with the real service (edit-in-place, callback timing, albums) | ❌ not run live: expect small fixes on first use |
+| Windows scripts, Docker | ⚠️ untested |
+
+## 12. Roadmap
+
+**Phase 1: Drafts (done).** Share → draft → tone/language/targets → approve → API / inbox / manual. Acceptance: a photo
+shared to the bot returns a card in one message; a tone tap changes the caption without re-reading the media; nothing
+posts without Approve.
+
+**Phase 2: Editing.** Turn the Phase-1 *edit ideas* into edits you approve: trims/cuts, hook-text burn-in, reframing
+styles, cover-frame pick, carousel ordering, short preview clip in chat before Approve, optional CapCut/Jianying draft
+export (desktop only). Plumbing exists (`EDIT_LEVEL=fit|creative`, ffmpeg reframe/overlay, draft export); missing is the
+review loop (preview + “apply this edit” taps) and trim suggestions in the Understand schema.
+
+**Phase 3: Autonomy and insight.** Auto-approve safe patterns, proactive nudges (“no food post in 6 days: send a photo”),
+performance feedback from platform insights to tune what it suggests, a Telegram Mini App for grid preview, optional
+second channel (WhatsApp), multiple accounts.
+
+## 13. Adding another channel
+
+Implement `Notifier` (`notify`, `present(card, handle) -> handle`, `send_files`) to show things, and call
+`DraftService.create(paths, instruction, source, handle)`, `handle_action(draft_id, action)`, `instruct(draft_id, text)`
+and `settings_action(action)` for input. Cards are plain data (`Card`, `Button`); nothing else changes.
+
+## 14. Cost (rough, unmeasured)
+
+The vision call dominates (images dominate its tokens). Each tone/language tap is a small text-only call. Set
+`WRITER_MODEL=claude-sonnet-5-5` to make rewrites cheaper while keeping the default model for looking at media. Trend
+research runs once a day. Check your own usage before relying on any figure.

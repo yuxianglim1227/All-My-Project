@@ -6,11 +6,12 @@ import pytest
 from conftest import needs_ffmpeg
 from fakes import FakeLLM
 from socialagent import media
-from socialagent.brain import PlanContext, PlanError, Planner, validate_plan
+from socialagent.brain import PlanContext, PlanError, Understander, Writer, eligible_targets, validate_plan
 from socialagent.config import BrandProfile
 from socialagent.llm import LLMError
-from socialagent.models import PLAN_SCHEMA, ContentPlan, MediaItem, PlannedPost
+from socialagent.models import UNDERSTAND_SCHEMA, WRITE_SCHEMA, ContentPlan, MediaItem, PlannedPost
 from socialagent.store import Store
+from socialagent.styles import StyleCatalog
 from socialagent.trends import TrendResearcher, harvest_links, platform_of
 
 BRAND = BrandProfile.from_dict({
@@ -121,38 +122,147 @@ def test_risk_flags_normalised():
     assert plan.risk_flags == ["other_people_visible"]
 
 
-# ---------------------------------------------------------------- planner (real media + fake LLM)
+# ---------------------------------------------------------------- understander (vision) - real media + fake LLM
 @needs_ffmpeg
-def test_planner_builds_multimodal_request_and_returns_validated_plan(media_dir, tmp_path):
+def test_understander_builds_a_multimodal_request_and_returns_a_validated_brief(media_dir, tmp_path):
     llm = FakeLLM()
-    planner = Planner(llm, BRAND, tmp_path)
+    u = Understander(llm, BRAND, tmp_path)
     items = [media.probe(media_dir / "photo.jpg"), media.probe(media_dir / "landscape.mp4")]
-    ctx = PlanContext(now_local="2026-11-11 18:00 (Wednesday)", feed_summary="- IG reel: x", trends="- trend A",
-                      inspiration="- inspo B")
-    plan, notes = planner.plan("story only please", items, ctx)
+    ctx = PlanContext(now_local="2026-11-11 18:00 (Wednesday)", feed_summary="- IG reel: x", trends="- trend A")
+    brief, notes = u.understand("story only please", items, ctx)
 
-    assert plan.posts[0].kind == "photo" and plan.posts[0].hashtags[0] == "#mybrand"
+    assert brief.summary == "A sunny cafe table." and brief.mood == "cozy" and brief.facts == ["a cafe table", "a latte"]
+    assert [(p.platform, p.kind) for p in brief.posts] == [("instagram", "photo")] and brief.pillar == "Daily life"
     call = llm.calls[0]
-    assert call["schema"] is PLAN_SCHEMA
-    assert "Daily life" in call["system"] and "UNTRUSTED" in call["system"]
+    assert call["schema"] is UNDERSTAND_SCHEMA
+    assert "Daily life" in call["system"] and "UNTRUSTED" in call["system"] and "do NOT write captions" in call["system"]
     blocks = call["content"]
     images = [b for b in blocks if b["type"] == "image"]
     assert len(images) == 1 + 4                               # 1 photo + 4 sampled video frames
     assert all(b["source"]["media_type"] == "image/jpeg" and b["source"]["data"] for b in images)
     text = "\n".join(b["text"] for b in blocks if b["type"] == "text")
-    assert "story only please" in text and "Media #1: video 1280x720" in text
-    assert "<trends>\n- trend A\n</trends>" in text and "<inspiration>\n- inspo B\n</inspiration>" in text
-    assert "2026-11-11 18:00" in text
+    assert "story only please" in text and "Media #1: video 1280x720" in text and "2026-11-11 18:00" in text
+    assert "<trends>\n- trend A\n</trends>" in text
+    assert "ELIGIBLE TARGETS" in text and "- instagram carousel (media 0, 1)" in text      # mixed media: only a carousel is possible
+    assert "- tiktok" not in text
 
 
 @needs_ffmpeg
-def test_planner_respects_image_budget(media_dir, tmp_path):
-    planner = Planner(FakeLLM(), BRAND, tmp_path, max_images=3)
+def test_understander_respects_image_budget(media_dir, tmp_path):
+    u = Understander(FakeLLM(), BRAND, tmp_path, max_images=3)
     items = [media.probe(media_dir / "photo.jpg")] * 2 + [media.probe(media_dir / "landscape.mp4")] * 2
-    blocks = planner.build_content("", items, PlanContext(now_local="t"))
+    blocks = u.build_content("", items, PlanContext(now_local="t"), eligible_targets(items))
     assert sum(b["type"] == "image" for b in blocks) == 3
     assert any("omitted" in b.get("text", "") for b in blocks)
     assert "(none - use your judgement)" in blocks[0]["text"]
+
+
+@needs_ffmpeg
+def test_understander_keeps_the_brief_when_no_suggested_target_is_valid(media_dir, tmp_path):
+    llm = FakeLLM()
+    llm.plan_response["posts"] = [{**llm.plan_response["posts"][0], "kind": "reel"}]      # a Reel from a photo: impossible
+    brief, notes = Understander(llm, BRAND, tmp_path).understand("", [media.probe(media_dir / "photo.jpg")], PlanContext(now_local="t"))
+    assert brief.posts == [] and brief.summary == "A sunny cafe table."                 # understanding is kept, nothing pre-selected
+    assert any("nothing is pre-selected" in n for n in notes)
+
+
+@needs_ffmpeg
+def test_understander_cleans_up_its_temp_images(media_dir, tmp_path):
+    Understander(FakeLLM(), BRAND, tmp_path).understand("", [media.probe(media_dir / "photo.jpg")], PlanContext(now_local="t"))
+    assert list(tmp_path.glob("vision_*")) == []
+
+
+# ---------------------------------------------------------------- eligible targets
+def _img():
+    return MediaItem(path="x.jpg", kind="image", width=10, height=10)
+
+
+def _vid():
+    return MediaItem(path="x.mp4", kind="video", duration=5)
+
+
+@pytest.mark.parametrize("media_items,expected", [
+    ([], []),
+    ([_img()], [("instagram", "photo"), ("instagram", "story"), ("tiktok", "photo")]),
+    ([_vid()], [("instagram", "reel"), ("instagram", "story"), ("tiktok", "video")]),
+    ([_img(), _img()], [("instagram", "carousel"), ("tiktok", "photo")]),
+    ([_vid(), _vid()], [("instagram", "carousel")]),                      # TikTok video needs exactly one video
+    ([_img(), _vid()], [("instagram", "carousel")]),
+])
+def test_eligible_targets(media_items, expected):
+    assert [e.key for e in eligible_targets(media_items)] == expected
+
+
+def test_eligible_targets_respect_platform_item_caps():
+    many = [_img() for _ in range(40)]
+    ig, tt = eligible_targets(many)
+    assert len(ig.media_indexes) == 10 and len(tt.media_indexes) == 35
+
+
+# ---------------------------------------------------------------- writer (text only)
+class StubLLM:
+    def __init__(self, response):
+        self.response, self.calls = response, []
+
+    def json(self, *, system, content, schema, max_tokens=8000):
+        self.calls.append({"system": system, "content": content, "schema": schema})
+        return self.response
+
+
+TARGETS = [{"id": "t1", "platform": "instagram", "kind": "photo"}, {"id": "t2", "platform": "tiktok", "kind": "video"},
+           {"id": "t3", "platform": "instagram", "kind": "story"}]
+BRIEF = ContentPlan(summary="Hotpot with friends", mood="warm", facts=["hotpot", "4 friends"], pillar="Daily life", trend_used="photo dump")
+STYLE = StyleCatalog.from_brand()
+
+
+def write(stub, **kw):
+    tone, lang = STYLE.tone(kw.pop("tone", "funny")), STYLE.language(kw.pop("lang", "zh"))
+    return Writer(stub, BRAND).write(brief=BRIEF, targets=kw.pop("targets", TARGETS), tone=tone, language=lang, **kw)
+
+
+def entry(tid, **kw):
+    return {"target": tid, "caption": " Hello ", "hashtags": ["food", "#Food", "#spam", "yum"], "on_screen_text": "", "when": "", **kw}
+
+
+def test_writer_cleans_results_per_platform():
+    stub = StubLLM({"captions": [entry("t1"), entry("t2", hashtags=[f"#t{i}" for i in range(20)]),
+                                 entry("t3", caption="should be dropped", on_screen_text="  hotpot   night " + "x" * 100, when="now")],
+                    "note": ""})
+    out = write(stub)
+    assert out["t1"]["caption"] == "Hello" and out["t1"]["hashtags"] == ["#mybrand", "#food", "#yum"]     # brand tag first, deduped, banned removed
+    assert len(out["t2"]["hashtags"]) == 8 and out["t2"]["hashtags"][0] == "#mybrand"                    # TikTok cap
+    assert out["t3"]["caption"] == "" and out["t3"]["hashtags"] == [] and out["t3"]["when"] == "now"      # Stories never get captions/tags
+    assert out["t3"]["on_screen_text"].startswith("hotpot night") and len(out["t3"]["on_screen_text"]) == 80
+
+
+def test_writer_prompt_carries_style_facts_change_request_and_untrusted_data():
+    stub = StubLLM({"captions": [entry("t1")], "note": ""})
+    write(stub, targets=TARGETS[:1], instruction="at the new place", change="shorter", previous={"t1": "old words", "t9": ""},
+          trends="- T", inspiration="- I", now_local="2026-11-11 18:00")
+    c = stub.calls[0]
+    assert c["schema"] is WRITE_SCHEMA and "Return one entry per requested target" in c["system"] and "Daily life" in c["system"]
+    text = c["content"]
+    assert "Tone: Funny - Witty and playful" in text and "Language: 简体 - 用自然、地道的简体中文" in text
+    assert "at the new place" in text and "CHANGE REQUEST (for this rewrite):\nshorter" in text
+    assert "FACTS:\n- hotpot\n- 4 friends" in text and "- t1: instagram photo" in text
+    assert "PREVIOUS DRAFT (do not repeat its wording):\n- t1: old words" in text and "t9" not in text
+    assert "<trends>\n- T\n</trends>" in text and "<inspiration>\n- I\n</inspiration>" in text and "UNTRUSTED" in text
+    assert "base64" not in text                                                                           # text only: no pixels
+
+
+def test_writer_without_previous_or_change_says_so():
+    stub = StubLLM({"captions": [entry("t1")], "note": ""})
+    write(stub, targets=TARGETS[:1])
+    assert "PREVIOUS DRAFT" not in stub.calls[0]["content"] and "CHANGE REQUEST (for this rewrite):\n(none)" in stub.calls[0]["content"]
+
+
+def test_writer_errors_when_a_requested_target_is_missing_or_empty():
+    with pytest.raises(PlanError, match="didn't return a caption for tiktok video"):
+        write(StubLLM({"captions": [entry("t1")], "note": ""}), targets=TARGETS[:2])
+    with pytest.raises(PlanError, match="empty caption for instagram photo"):
+        write(StubLLM({"captions": [entry("t1", caption="   ")], "note": ""}), targets=TARGETS[:1])
+    extra = write(StubLLM({"captions": [entry("t1"), entry("t99")], "note": ""}), targets=TARGETS[:1])
+    assert list(extra) == ["t1"]                                                                          # unknown ids ignored
 
 
 # ---------------------------------------------------------------- trends

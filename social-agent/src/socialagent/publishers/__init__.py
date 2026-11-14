@@ -2,5 +2,6 @@
 
 from .base import PreparedMedia, PublishError, PublishRequest, PublishResult, Publisher
 from .dryrun import DryRunPublisher
+from .manual import ManualPublisher
 
-__all__ = ["DryRunPublisher", "PreparedMedia", "PublishError", "PublishRequest", "PublishResult", "Publisher"]
+__all__ = ["DryRunPublisher", "ManualPublisher", "PreparedMedia", "PublishError", "PublishRequest", "PublishResult", "Publisher"]

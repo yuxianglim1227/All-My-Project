@@ -104,7 +104,7 @@ def test_highlight_checklist_groups_by_collection(tmp_path):
 def test_tick_publishes_due_posts(tmp_path, media_dir):
     rig = make_rig(tmp_path)
     set_plan(rig.llm, one_post(when="now"))
-    rig.pipeline.submit([media_dir / "photo.jpg"])
+    rig.submit([media_dir / "photo.jpg"])
     rig.clock.now = T0 + timedelta(minutes=3)
     assert rig.scheduler.tick()["published"] == 1
 

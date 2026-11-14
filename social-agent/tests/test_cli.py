@@ -46,26 +46,51 @@ def test_load_dotenv_parsing_and_precedence(tmp_path):
 
 # ---------------------------------------------------------------- commands
 @needs_ffmpeg
-def test_submit_queue_cancel_flow_via_cli(env, media_dir, capsys):
+def test_submit_draft_approve_cancel_flow_via_cli(env, media_dir, capsys):
+    import re
     llm = FakeLLM()
     set_plan(llm, one_post(when="next_slot"))
     original = env / "mine.jpg"
     shutil.copyfile(media_dir / "photo.jpg", original)
     before = original.read_bytes()
 
-    assert run(["submit", str(original), "-i", "nice coffee"], llm=llm) == 0
+    assert run(["submit", str(original), "-i", "nice coffee, funny 中文"], llm=llm) == 0
     out = capsys.readouterr().out
-    assert "DRY RUN" in out and "Instagram photo" in out and "Cancel #1" in out
+    assert "Draft [" in out and "Instagram post" in out and "Funny" in out and "approve" in out and "tone:funny" in out
     assert original.read_bytes() == before                                  # originals are never modified
+    did = re.search(r"Draft \[(\w+)\]", out).group(1)
 
-    assert run(["queue"]) == 0
+    assert run(["queue"], llm=llm) == 0
+    assert "1 draft(s) waiting" in capsys.readouterr().out                 # a draft, NOT a scheduled post
+    assert run(["draft", did, "--tone", "hype", "--lang", "en"], llm=llm) == 0
+    card = capsys.readouterr().out
+    assert "Hype" in card and card.count("Draft [") == 1                   # edits are quiet: one final card
+
+    assert run(["draft", did, "--approve"], llm=llm) == 0
+    assert "Approved draft" in capsys.readouterr().out
+    assert run(["queue"], llm=llm) == 0
     queue_out = capsys.readouterr().out
     assert "instagram photo" in queue_out
     pid = queue_out.split("[")[-1].split("]")[0]
-    assert run(["cancel", pid]) == 0
+    assert run(["cancel", pid], llm=llm) == 0
     assert "Cancelled" in capsys.readouterr().out
-    assert run(["cancel", pid]) == 1                                         # second time: nothing to cancel
-    assert run(["queue"]) == 0 and "Nothing queued" in capsys.readouterr().out
+    assert run(["cancel", pid], llm=llm) == 1                              # second time: nothing to cancel
+    assert run(["queue"], llm=llm) == 0 and "Nothing queued" in capsys.readouterr().out
+
+
+@needs_ffmpeg
+def test_draft_command_edits_discard_and_unknown_ids(env, media_dir, capsys):
+    import re
+    llm = FakeLLM()
+    assert run(["submit", str(media_dir / "photo.jpg")], llm=llm) == 0
+    did = re.search(r"Draft \[(\w+)\]", capsys.readouterr().out).group(1)
+    assert run(["drafts"], llm=llm) == 0 and f"[{did}]" in capsys.readouterr().out
+    assert run(["draft", did, "--toggle", "t3", "--caption", "= my own", "--change", "shorter"], llm=llm) == 0
+    assert "TikTok" in capsys.readouterr().out
+    assert run(["draft", did, "--discard"], llm=llm) == 0 and "Discarded" in capsys.readouterr().out
+    assert run(["draft", did, "--approve"], llm=llm) == 0                  # already discarded: refused, nothing scheduled
+    assert run(["queue"], llm=llm) == 0 and "Nothing queued" in capsys.readouterr().out
+    assert run(["draft", "nosuch"], llm=llm) == 1
 
 
 def test_submit_missing_file_is_a_clean_error(env, capsys):
@@ -106,6 +131,8 @@ def test_selfcheck_in_dry_run_passes_with_warnings(env, capsys):
     assert run(["selfcheck"]) == 0
     out = capsys.readouterr().out
     assert "DRY_RUN is ON" in out and "ffmpeg" in out and "ANTHROPIC_API_KEY not set" in out and "brand profile loaded" in out
+    assert "publishing method now: instagram=manual, tiktok=manual" in out      # usable before any API setup
+    assert "manual: ready" in out and "EDIT_LEVEL=none (Phase 1" in out
 
 
 def test_selfcheck_live_reports_platform_failures_with_exit_1(env, monkeypatch, capsys):

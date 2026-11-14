@@ -12,7 +12,7 @@ from socialagent.timeutil import iso, parse_iso, parse_when, tz
 def test_settings_defaults_are_safe():
     s = Settings.from_env({})
     assert s.dry_run is True            # never posts until explicitly enabled
-    assert s.require_approval is False
+    assert s.edit_level == "none"                    # Phase 1: originals, no creative editing
     assert s.tiktok_privacy == "SELF_ONLY"
     assert s.owner_telegram_id is None
 
@@ -112,10 +112,10 @@ def test_due_claim_cancel_flow(store):
     now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
     early = _post(store, sid, now - timedelta(minutes=1))
     later = _post(store, sid, now + timedelta(hours=1))
-    pend = _post(store, sid, now - timedelta(minutes=5), status="pending_approval")
+    handed = _post(store, sid, now - timedelta(minutes=5), status="handed_off", method="manual")
 
     due = store.due_posts(now)
-    assert [p["id"] for p in due] == [early]              # not the future one, not the unapproved one
+    assert [p["id"] for p in due] == [early]              # not the future one, not a manual hand-off
     assert due[0]["hashtags"] == ["#t"] and due[0]["media"][0]["kind"] == "image"
 
     assert store.claim_post(early) is True
@@ -125,9 +125,10 @@ def test_due_claim_cancel_flow(store):
     assert store.get_post(later)["status"] == "cancelled"
     assert store.due_posts(now) == []
 
-    assert store.approve_post(pend, now) is True
-    assert store.approve_post(pend, now) is False
-    assert [p["id"] for p in store.due_posts(now)] == [pend]
+    # manual method: the owner confirms they posted it themselves
+    assert store.get_post(handed)["method"] == "manual"
+    assert store.confirm_posted(handed) is True and store.get_post(handed)["status"] == "published"
+    assert store.confirm_posted(handed) is False and store.confirm_posted(early) is False   # only hand-offs can be confirmed
 
 
 def test_set_post_rejects_unknown_columns(store):
@@ -175,7 +176,25 @@ def test_env_example_matches_the_settings_the_code_actually_reads():
     assert unread == [], f".env.example documents variables the code never reads: {unread}"
 
     s = Settings.from_env(env)
-    assert s.dry_run is True and s.require_approval is False        # the shipped example is safe by default
+    assert s.dry_run is True and s.edit_level == "none"             # the shipped example is safe by default
     assert s.tiktok_privacy == "SELF_ONLY" and s.tiktok_mode == "direct"
     assert s.claude_model == "claude-opus-5-5" and s.owner_telegram_id is None
-    assert s.undo_window_seconds == 120 and s.collect_window_seconds == 8 and s.max_reel_seconds == 90
+    assert s.undo_window_seconds == 120 and s.collect_window_seconds == 3 and s.max_reel_seconds == 90
+
+
+# ---------------------------------------------------------------- drafts table
+def test_draft_roundtrip_update_list_and_card_lookup(store):
+    sid = store.add_submission(source="t", instruction="", media=[])
+    did = store.add_draft(submission_id=sid, tone="funny", lang="zh", instruction="hi", state="drafting")
+    d = store.get_draft(did)
+    assert (d["state"], d["tone"], d["lang"], d["brief"], d["targets"]) == ("drafting", "funny", "zh", None, [])
+    store.update_draft(did, state="ready", brief={"summary": "s"}, targets=[{"id": "t1"}], card_ref="777", tone="aesthetic")
+    d = store.get_draft(did)
+    assert (d["state"], d["tone"], d["brief"], d["targets"], d["card_ref"]) == ("ready", "aesthetic", {"summary": "s"}, [{"id": "t1"}], "777")
+    assert store.find_draft_by_card("777")["id"] == did and store.find_draft_by_card("nope") is None
+    other = store.add_draft(submission_id=sid, tone="funny", lang="en", instruction="", state="discarded")
+    assert [x["id"] for x in store.list_drafts(["ready"])] == [did]
+    assert {x["id"] for x in store.list_drafts()} == {did, other}
+    with pytest.raises(KeyError):
+        store.update_draft(did, bogus="x")
+    assert store.get_draft("missing") is None

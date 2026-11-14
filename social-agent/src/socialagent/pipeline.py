@@ -1,11 +1,13 @@
-"""Orchestration: media in -> plan -> edit -> schedule -> (undo window / approval) -> publish -> report.
+"""Publish-side engine: turn APPROVED draft targets into scheduled posts, publish them when due, report back.
+
+(Intake - looking at media, writing captions, the draft card and its buttons - lives in ``drafts.py``.)
 
 Safety properties enforced here (and covered by tests):
 * nothing is published before its scheduled time, and "post now" still waits the undo window;
 * a post is claimed atomically, so it can never be published twice by concurrent ticks;
 * an ambiguous failure is never retried automatically (could create a duplicate post);
 * posts left "publishing" by a crash are marked failed for review, never silently re-sent;
-* any risk flag from the planner, or REQUIRE_APPROVAL, parks the post until the owner approves.
+* nothing reaches this module without the owner's explicit approval of a draft.
 """
 
 from __future__ import annotations
@@ -18,21 +20,23 @@ import threading
 import time as _time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 from . import feed
 from . import media as media_mod
-from .brain import PlanContext, PlanError, Planner
+from .brain import PlanError
 from .config import BrandProfile, Settings
 from .hosting import MediaHost
-from .llm import LLMError
 from .media import MediaError
-from .models import FAILED, MediaItem, PENDING_APPROVAL, PUBLISHED, PUBLISHING, SCHEDULED, PlannedPost
+from .models import FAILED, HANDED_OFF, MediaItem, PUBLISHED, PUBLISHING, SCHEDULED, PlannedPost
+from .notify import ListNotifier, Notifier
 from .publishers import DryRunPublisher, PreparedMedia, PublishError, PublishRequest, Publisher
 from .store import Store
 from .textutil import IG_CAPTION_MAX, TIKTOK_TITLE_MAX, compose_caption
 from .timeutil import parse_iso, parse_when, tz, utcnow
 from .trends import TrendResearcher
+
+__all__ = ["ListNotifier", "Notifier", "Pipeline"]
 
 log = logging.getLogger(__name__)
 
@@ -44,33 +48,13 @@ FEED_KINDS = {"instagram": ("photo", "carousel", "reel"), "tiktok": ("video", "p
 RETENTION_DAYS = 14
 
 
-class Notifier(Protocol):
-    def notify(self, text: str, *, actions: list[tuple[str, str]] | None = None) -> None: ...
-
-
-class ListNotifier:
-    """Collects messages (tests, CLI)."""
-
-    def __init__(self) -> None:
-        self.messages: list[tuple[str, list[tuple[str, str]]]] = []
-
-    def notify(self, text: str, *, actions: list[tuple[str, str]] | None = None) -> None:
-        self.messages.append((text, actions or []))
-        log.info("NOTIFY: %s", text.replace("\n", " | ")[:200])
-
-    @property
-    def texts(self) -> list[str]:
-        return [t for t, _ in self.messages]
-
-
 class Pipeline:
-    def __init__(self, *, settings: Settings, brand: BrandProfile, store: Store, planner: Planner,
-                 trends: TrendResearcher, publishers: dict[str, Publisher], host: MediaHost, notifier: Notifier,
+    def __init__(self, *, settings: Settings, brand: BrandProfile, store: Store, trends: TrendResearcher,
+                 publishers: dict[str, Publisher], host: MediaHost, notifier: Notifier, manual: Publisher | None = None,
                  clock: Callable[[], datetime] = utcnow, rng: random.Random | None = None,
                  draft_maker: Callable[[str, int, PlannedPost, list[MediaItem]], str | None] | None = None):
-        self.settings, self.brand, self.store = settings, brand, store
-        self.planner, self.trends = planner, trends
-        self.publishers, self.host, self.notifier = publishers, host, notifier
+        self.settings, self.brand, self.store, self.trends = settings, brand, store, trends
+        self.publishers, self.manual, self.host, self.notifier = publishers, manual, host, notifier
         self.clock = clock
         self.rng = rng or random.Random()
         self.draft_maker = draft_maker
@@ -85,123 +69,115 @@ class Pipeline:
         except OSError:
             return 0.0
 
-    def _reload_brand(self) -> None:
+    def reload_brand(self) -> bool:
+        """Re-read brand.yaml if it changed on disk. Returns True when the profile was replaced."""
         m = self._mtime()
         if m and m != self._brand_mtime:
-            self.brand = self.planner.brand = self.trends.brand = BrandProfile.load(self.settings.brand_file)
+            self.brand = self.trends.brand = BrandProfile.load(self.settings.brand_file)
             self._brand_mtime = m
             log.info("Brand profile reloaded")
+            return True
+        return False
 
-    # ------------------------------------------------------------------ intake
-    def submit(self, media_paths: list[Path | str], instruction: str = "", source: str = "cli") -> str | None:
-        """Plan, prepare and schedule everything for one batch of media. Returns the submission id."""
-        self._reload_brand()
-        try:
-            items = [media_mod.probe(p) for p in media_paths]
-        except MediaError as exc:
-            self.notifier.notify(f"❌ I couldn't read that file: {exc}")
-            return None
-        if not items:
-            self.notifier.notify("Send me a photo or video (with an instruction if you like) and I'll take it from there.")
-            return None
-        sid = self.store.add_submission(source=source, instruction=instruction, media=[i.to_dict() for i in items])
-        kinds = [i.kind for i in items]
-        self.notifier.notify(f"📥 Got {kinds.count('image')} photo(s) and {kinds.count('video')} video(s). Planning…")
-        try:
-            self._plan_and_schedule(sid, items, instruction)
-        except (LLMError, PlanError) as exc:
-            self.store.update_submission(sid, status="failed", error=str(exc))
-            self.notifier.notify(f"❌ I couldn't plan this one: {exc}\nYour files are saved - send them again or give me a hint.")
-        except Exception as exc:  # never lose the owner's media silently
-            log.exception("Unexpected error while handling submission %s", sid)
-            self.store.update_submission(sid, status="failed", error=repr(exc))
-            self.notifier.notify(f"❌ Something went wrong while handling that ({type(exc).__name__}: {exc}).")
-        return sid
-
-    def _plan_and_schedule(self, sid: str, items: list[MediaItem], instruction: str) -> None:
-        now = self.clock()
-        recent = self.store.list_posts(feed.LIVE_STATUSES, limit=30, newest_first=True)
-        ctx = PlanContext(
-            now_local=f"{now.astimezone(self.zone):%Y-%m-%d %H:%M (%A)} {self.settings.timezone}",
-            feed_summary=feed.feed_summary(recent, now, self.zone), pillar_status=feed.pillar_status(self.brand, recent),
-            trends=self.trends.trends_for_prompt(), inspiration=self.trends.inspiration_for_prompt())
-        plan, notes = self.planner.plan(instruction, items, ctx)
-        self.store.update_submission(sid, status="planned", plan=plan.to_dict())
-        needs_approval = self.settings.require_approval or bool(plan.risk_flags)
-
-        prepared: list[tuple[PlannedPost, list[dict[str, Any]]]] = []
-        for n, pp in enumerate(plan.posts):  # slow ffmpeg work happens outside the scheduling lock
+    # ------------------------------------------------------------------ approved drafts -> scheduled posts
+    def schedule_targets(self, sid: str, items: list[MediaItem], targets: list[dict[str, Any]], *, pillar: str = "",
+                         method_for: Callable[[str], str] = lambda platform: "api",
+                         now_flag: bool = False) -> tuple[list[dict[str, Any]], list[str]]:
+        """Prepare media and create publish jobs for approved targets. Returns (created posts, notes for the owner)."""
+        notes: list[str] = []
+        prepared: list[tuple[dict[str, Any], str, list[dict[str, Any]]]] = []
+        for n, t in enumerate(targets):  # slow ffmpeg work happens outside the scheduling lock
+            method = method_for(t["platform"])
             try:
-                prepared.append((pp, self._prepare(sid, n, pp, items, notes)))
+                prepared.append((t, method, self._prepare(sid, n, t, items, notes, method)))
             except MediaError as exc:
-                notes.append(f"Couldn't prepare the {pp.platform} {pp.kind}: {exc}")
+                notes.append(f"Couldn't prepare the {t['platform']} {t['kind']}: {exc}")
         if not prepared:
             raise PlanError("; ".join(notes) or "Nothing could be prepared.")
 
-        created: list[tuple[str, PlannedPost, datetime, str]] = []
-        with self._lock:  # slot choice + insert must be atomic across concurrent submissions
+        created: list[dict[str, Any]] = []
+        with self._lock:  # slot choice + insert must be atomic across concurrent approvals
             now = self.clock()
-            for pp, files in prepared:
-                when, when_note = self._schedule(pp, now)
+            for t, method, files in prepared:
+                when, when_note = self._schedule(t["platform"], t["kind"], t.get("when", ""), now, force_now=now_flag)
                 if when_note:
                     notes.append(when_note)
-                max_len = IG_CAPTION_MAX if pp.platform == "instagram" else TIKTOK_TITLE_MAX
-                caption = "" if pp.kind == "story" else compose_caption(pp.platform, pp.caption, pp.hashtags, max_len=max_len)
+                if t["kind"] == "story":  # Stories have no caption: the field carries the suggested text sticker
+                    caption = t.get("on_screen_text", "")
+                else:
+                    max_len = IG_CAPTION_MAX if t["platform"] == "instagram" else TIKTOK_TITLE_MAX
+                    caption = compose_caption(t["platform"], t.get("caption", ""), t.get("hashtags", []), max_len=max_len)
                 pid = self.store.add_post(
-                    submission_id=sid, platform=pp.platform, kind=pp.kind, caption=caption, hashtags=pp.hashtags,
-                    media=files, publish_at=when, status=PENDING_APPROVAL if needs_approval else SCHEDULED,
-                    pillar=plan.pillar, highlight=pp.highlight, why=pp.why)
-                created.append((pid, pp, when, caption))
-        self.store.update_submission(sid, status="scheduled")
-
-        if self.draft_maker:
-            for n, (_, pp, _, _) in enumerate(created):
-                if pp.kind in ("reel", "video"):
+                    submission_id=sid, platform=t["platform"], kind=t["kind"], caption=caption, hashtags=t.get("hashtags", []),
+                    media=files, publish_at=when, status=SCHEDULED, pillar=pillar, highlight=t.get("highlight", ""),
+                    why=t.get("why", ""), method=method)
+                created.append({"id": pid, "platform": t["platform"], "kind": t["kind"], "when": when, "method": method,
+                                "caption": caption, "highlight": t.get("highlight", "")})
+        if self.draft_maker and self.settings.edit_level == "creative":  # Phase 2 extra: never blocks posting
+            for n, t in enumerate(targets):
+                if t["kind"] in ("reel", "video"):
                     try:
-                        msg = self.draft_maker(sid, n, pp, [items[i] for i in pp.media_indexes])
+                        msg = self.draft_maker(sid, n, PlannedPost(platform=t["platform"], kind=t["kind"],
+                                                                   on_screen_text=t.get("on_screen_text", "")),
+                                               [items[i] for i in t["media_indexes"]])
                         if msg:
                             notes.append(msg)
-                    except Exception as exc:  # optional extra: never block posting
+                    except Exception as exc:
                         notes.append(f"CapCut/Jianying draft skipped: {exc}")
-        text, actions = self._plan_message(plan, created, notes, needs_approval, now)
-        self.notifier.notify(text, actions=actions)
+        return created, notes
 
-    # ------------------------------------------------------------------ media prep
-    def _prepare(self, sid: str, n: int, pp: PlannedPost, items: list[MediaItem], notes: list[str]) -> list[dict[str, Any]]:
-        out = self.settings.prepared_dir / sid / f"{n}-{pp.platform}-{pp.kind}"
+    # ------------------------------------------------------------------ media prep (EDIT_LEVEL)
+    def _prepare(self, sid: str, n: int, t: dict[str, Any], items: list[MediaItem], notes: list[str],
+                 method: str) -> list[dict[str, Any]]:
+        """none: originals, fixed only where the platform would reject them. fit: + reframe. creative: + hook text.
+
+        Manual hand-off always uses the untouched originals (you post from your own gallery).
+        """
+        sel = [items[i] for i in t["media_indexes"]]
+        if method == "manual":
+            return [{"path": it.path, "kind": it.kind, "duration": it.duration} for it in sel]
+        out = self.settings.prepared_dir / sid / f"{n}-{t['platform']}-{t['kind']}"
         out.mkdir(parents=True, exist_ok=True)
-        sel = [items[i] for i in pp.media_indexes]
-        font = self.settings.font_path
-        overlay = pp.on_screen_text
+        level, font = self.settings.edit_level, self.settings.font_path
+        overlay = t.get("on_screen_text", "") if level == "creative" else ""
         if overlay and not media_mod.find_font(overlay, font):
             notes.append("I couldn't add the on-screen text: no suitable font is installed (CJK text needs e.g. fonts-noto-cjk).")
             overlay = ""
+        platform, kind = t["platform"], t["kind"]
+        max_reel = min(self.settings.max_reel_seconds, 90)
         files: list[Path] = []
-        if pp.platform == "instagram":
-            if pp.kind == "photo":
-                files = [media_mod.prepare_feed_image(sel[0].path, out / "photo.jpg")]
-            elif pp.kind == "carousel":
+        if platform == "instagram":
+            if kind in ("photo", "carousel"):
                 for j, it in enumerate(sel):
-                    files.append(media_mod.prepare_feed_image(it.path, out / f"{j}.jpg") if it.kind == "image" else
-                                 media_mod.prepare_video(it.path, out / f"{j}.mp4", max_seconds=STORY_MAX_SECONDS,
-                                                         width=1080, height=1350))
-            elif pp.kind == "reel":
-                files = [media_mod.prepare_video(sel[0].path, out / "reel.mp4", trim_start=pp.trim_start, trim_end=pp.trim_end,
-                                                 max_seconds=min(self.settings.max_reel_seconds, 90),
-                                                 overlay_text=overlay, font_path=font)]
-            elif pp.kind == "story":
+                    dst = out / (f"{j}.jpg" if kind == "carousel" else "photo.jpg")
+                    if it.kind == "image":
+                        files.append(media_mod.compliant_image(it.path, dst, ig_feed=True) if level == "none"
+                                     else media_mod.prepare_feed_image(it.path, dst))
+                    else:  # a video inside a carousel
+                        vdst = dst.with_suffix(".mp4")
+                        files.append(media_mod.compliant_video(it.path, vdst, max_seconds=STORY_MAX_SECONDS) if level == "none"
+                                     else media_mod.prepare_video(it.path, vdst, max_seconds=STORY_MAX_SECONDS, width=1080, height=1350))
+            elif kind == "reel":
+                files = [media_mod.compliant_video(sel[0].path, out / "reel.mp4", max_seconds=max_reel) if level == "none"
+                         else media_mod.prepare_video(sel[0].path, out / "reel.mp4", max_seconds=max_reel,
+                                                      overlay_text=overlay, font_path=font)]
+            elif kind == "story":
                 it = sel[0]
-                files = [media_mod.prepare_story_image(it.path, out / "story.jpg", overlay_text=overlay, font_path=font)
-                         if it.kind == "image" else
-                         media_mod.prepare_video(it.path, out / "story.mp4", trim_start=pp.trim_start, trim_end=pp.trim_end,
-                                                 max_seconds=STORY_MAX_SECONDS, overlay_text=overlay, font_path=font)]
+                if it.kind == "image":
+                    files = [media_mod.compliant_image(it.path, out / "story.jpg") if level == "none"
+                             else media_mod.prepare_story_image(it.path, out / "story.jpg", overlay_text=overlay, font_path=font)]
+                else:
+                    files = [media_mod.compliant_video(it.path, out / "story.mp4", max_seconds=STORY_MAX_SECONDS) if level == "none"
+                             else media_mod.prepare_video(it.path, out / "story.mp4", max_seconds=STORY_MAX_SECONDS,
+                                                          overlay_text=overlay, font_path=font)]
         else:
-            if pp.kind == "video":
-                files = [media_mod.prepare_video(sel[0].path, out / "tiktok.mp4", trim_start=pp.trim_start,
-                                                 trim_end=pp.trim_end, max_seconds=TIKTOK_MAX_SECONDS,
-                                                 overlay_text=overlay, font_path=font)]
+            if kind == "video":
+                files = [media_mod.compliant_video(sel[0].path, out / "tiktok.mp4", max_seconds=TIKTOK_MAX_SECONDS) if level == "none"
+                         else media_mod.prepare_video(sel[0].path, out / "tiktok.mp4", max_seconds=TIKTOK_MAX_SECONDS,
+                                                      overlay_text=overlay, font_path=font)]
             else:
-                files = [media_mod.prepare_plain_jpeg(it.path, out / f"{j}.jpg") for j, it in enumerate(sel)]
+                files = [media_mod.compliant_image(it.path, out / f"{j}.jpg") if level == "none"
+                         else media_mod.prepare_plain_jpeg(it.path, out / f"{j}.jpg") for j, it in enumerate(sel)]
         result = []
         for f in files:
             p = media_mod.probe(f)
@@ -209,31 +185,35 @@ class Pipeline:
         return result
 
     # ------------------------------------------------------------------ scheduling
-    def _schedule(self, pp: PlannedPost, now: datetime) -> tuple[datetime, str]:
+    def _schedule(self, platform: str, kind: str, when_str: str, now: datetime, *, force_now: bool = False) -> tuple[datetime, str]:
         undo = timedelta(seconds=self.settings.undo_window_seconds)
+        if force_now:
+            return now + undo, ""
         note = ""
-        explicit = parse_when(pp.when, self.zone)
+        explicit = parse_when(when_str, self.zone)
         if explicit is not None:
             if explicit >= now + timedelta(minutes=1):
                 return explicit, ""
             note = "The time you asked for had already passed, so I used the next free slot."
-        elif pp.when.strip().lower() in {"now", "asap"}:
+        elif (when_str or "").strip().lower() in {"now", "asap"}:
             return now + undo, ""
-        if pp.kind == "story" and not note:  # Stories are timely: go soon rather than wait for a feed slot
+        if kind == "story" and not note:  # Stories are timely: go soon rather than wait for a feed slot
             return now + undo, ""
-        plat = pp.platform
-        existing = self.store.times_for(plat, feed.LIVE_STATUSES, FEED_KINDS[plat])
+        existing = self.store.times_for(platform, feed.LIVE_STATUSES, FEED_KINDS[platform])
         slot = feed.choose_slot(
-            existing=existing, now=now, windows=self.brand.posting_windows.get(plat, []), zone=self.zone,
-            min_gap=timedelta(minutes=self.brand.min_gap_minutes.get(plat, 120)),
-            max_per_day=self.brand.max_per_day.get(plat, 3), jitter=timedelta(minutes=self.rng.randint(-7, 7)))
+            existing=existing, now=now, windows=self.brand.posting_windows.get(platform, []), zone=self.zone,
+            min_gap=timedelta(minutes=self.brand.min_gap_minutes.get(platform, 120)),
+            max_per_day=self.brand.max_per_day.get(platform, 3), jitter=timedelta(minutes=self.rng.randint(-7, 7)))
         return slot, note
 
-    # ------------------------------------------------------------------ owner messages
-    def _is_dry(self, platform: str) -> bool:
-        return isinstance(self.publishers.get(platform), DryRunPublisher)
+    def suggest_slot(self, platform: str, kind: str, when_str: str = "") -> datetime:
+        """When this target would go out if approved right now (shown on the draft card; not reserved)."""
+        return self._schedule(platform, kind, when_str, self.clock())[0]
 
-    def _fmt(self, dt: datetime, now: datetime | None = None) -> str:
+    def is_dry(self, platform: str, method: str = "api") -> bool:
+        return method != "manual" and isinstance(self.publishers.get(platform), DryRunPublisher)
+
+    def fmt(self, dt: datetime, now: datetime | None = None) -> str:
         local = dt.astimezone(self.zone)
         text = f"{local:%a %d %b %H:%M}"
         if now is not None:
@@ -241,51 +221,10 @@ class Pipeline:
             text += f" (in {mins // 60}h {mins % 60}m)" if mins >= 60 else f" (in {max(mins, 0)}m)"
         return text
 
-    def _plan_message(self, plan, created, notes, needs_approval, now) -> tuple[str, list[tuple[str, str]]]:
-        lines = []
-        if any(self._is_dry(pp.platform) for _, pp, _, _ in created):
-            lines.append("🧪 DRY RUN - nothing will really be posted (set DRY_RUN=false when you're ready).")
-        lines.append(f"🗓 Plan: {plan.summary or 'your content'}")
-        actions: list[tuple[str, str]] = []
-        for i, (pid, pp, when, caption) in enumerate(created, 1):
-            excerpt = (caption or pp.on_screen_text or "(Story)").replace("\n", " ")[:110]
-            lines.append(f"{i}. {pp.platform.title()} {pp.kind} - {self._fmt(when, now)}"
-                         + (f" - Highlight: {pp.highlight}" if pp.highlight else "") + f"\n   “{excerpt}”  [{pid}]")
-            if needs_approval:
-                actions.append((f"✅ Approve #{i}", f"approve:{pid}"))
-            actions.append((f"✖ Cancel #{i}", f"cancel:{pid}"))
-        meta = [f"Pillar: {plan.pillar}"] if plan.pillar else []
-        if plan.trend_used:
-            meta.append(f"Trend: {plan.trend_used}")
-        if meta:
-            lines.append(" · ".join(meta))
-        if needs_approval:
-            why = f"flagged {', '.join(plan.risk_flags)}" if plan.risk_flags else "approval mode is on"
-            lines.append(f"⚠️ Waiting for your OK ({why}).")
-        for n in notes:
-            lines.append(f"ℹ️ {n}")
-        if plan.edit_brief:
-            lines.append(f"🎬 CapCut/Jianying polish idea:\n{plan.edit_brief}")
-        if plan.message_to_owner:
-            lines.append(plan.message_to_owner)
-        return "\n".join(lines), actions
-
-    # ------------------------------------------------------------------ owner actions
+    # ------------------------------------------------------------------ owner actions on posts
     def cancel(self, post_id: str) -> bool:
         ok = self.store.cancel_post(post_id)
         self.notifier.notify(f"✖ Cancelled [{post_id}]." if ok else f"Couldn't cancel [{post_id}] (already posted, cancelled or unknown).")
-        return ok
-
-    def approve(self, post_id: str) -> bool:
-        post = self.store.get_post(post_id)
-        if not post:
-            self.notifier.notify(f"Unknown post [{post_id}].")
-            return False
-        now = self.clock()
-        when = max(parse_iso(post["publish_at"]), now + timedelta(seconds=20))
-        ok = self.store.approve_post(post_id, when)
-        self.notifier.notify(f"✅ Approved [{post_id}] - going out {self._fmt(when, now)}." if ok
-                             else f"[{post_id}] isn't waiting for approval.")
         return ok
 
     def retry(self, post_id: str) -> bool:
@@ -296,6 +235,15 @@ class Pipeline:
         self.store.set_post(post_id, status=SCHEDULED, publish_at=self.clock(), attempts=0, error=None)
         self.notifier.notify(f"🔁 Retrying [{post_id}] now.")
         return True
+
+    def confirm_posted(self, post_id: str) -> bool:
+        """Manual method: the owner says they posted it. Stories then join the Highlights checklist."""
+        post = self.store.get_post(post_id)
+        ok = self.store.confirm_posted(post_id)
+        if ok and post and post["kind"] == "story" and post.get("highlight"):
+            self.store.add_highlight_pending(post_id, post["highlight"])
+        self.notifier.notify(f"✅ Marked [{post_id}] as posted." if ok else f"[{post_id}] isn't waiting for you to post it.")
+        return ok
 
     # ------------------------------------------------------------------ publishing
     def tick(self, now: datetime | None = None) -> int:
@@ -311,7 +259,7 @@ class Pipeline:
     def _publish_one(self, post: dict[str, Any], now: datetime) -> None:
         pid, platform, kind = post["id"], post["platform"], post["kind"]
         label = f"{platform.title()} {kind} [{pid}]"
-        publisher = self.publishers.get(platform)
+        publisher = self.manual if post.get("method") == "manual" else self.publishers.get(platform)
         try:
             if publisher is None:
                 raise PublishError(f"No publisher configured for {platform}.", retryable=False)
@@ -328,6 +276,9 @@ class Pipeline:
             self.store.set_post(pid, status=FAILED, error=f"{type(exc).__name__}: {exc}")
             self.notifier.notify(f"❌ {label} failed unexpectedly: {exc}", actions=[("🔁 Retry", f"retry:{pid}")])
             return
+        if res.handed_off:  # the manual publisher already sent the package; the owner confirms when they have posted
+            self.store.set_post(pid, status=HANDED_OFF, remote_id=res.remote_id, note=res.note, error=None)
+            return
         self.store.set_post(pid, status=PUBLISHED, remote_id=res.remote_id, permalink=res.permalink, note=res.note, error=None)
         if kind == "story" and post.get("highlight"):
             self.store.add_highlight_pending(pid, post["highlight"])
@@ -339,7 +290,7 @@ class Pipeline:
         if exc.retryable and attempts < MAX_ATTEMPTS:
             when = now + timedelta(minutes=BACKOFF_MINUTES[min(attempts - 1, len(BACKOFF_MINUTES) - 1)])
             self.store.set_post(pid, status=SCHEDULED, attempts=attempts, publish_at=when, error=str(exc))
-            self.notifier.notify(f"⚠️ {label} hit a snag ({exc}). Trying again {self._fmt(when, now)}.")
+            self.notifier.notify(f"⚠️ {label} hit a snag ({exc}). Trying again {self.fmt(when, now)}.")
         else:
             self.store.set_post(pid, status=FAILED, attempts=attempts, error=str(exc))
             self.notifier.notify(f"❌ {label} failed: {exc}", actions=[("🔁 Retry", f"retry:{pid}")])
@@ -355,29 +306,37 @@ class Pipeline:
 
     # ------------------------------------------------------------------ reports & maintenance
     def queue_text(self) -> str:
-        upcoming = self.store.list_posts([SCHEDULED, PENDING_APPROVAL, PUBLISHING], limit=20)
-        if not upcoming:
+        upcoming = self.store.list_posts([SCHEDULED, PUBLISHING, HANDED_OFF], limit=20)
+        drafts = self.store.list_drafts(["ready"], limit=10)
+        if not upcoming and not drafts:
             return "Nothing queued. Send me a photo or video!"
         now = self.clock()
-        lines = ["📬 Queue:"]
+        lines = []
+        if drafts:
+            lines.append(f"📝 {len(drafts)} draft(s) waiting for you: " + ", ".join(f"[{d['id']}]" for d in drafts) + "  (/drafts)")
+        if upcoming:
+            lines.append("📬 Queue:")
         for p in upcoming:
-            tag = " (needs approval)" if p["status"] == PENDING_APPROVAL else ""
+            tag = " (waiting for you to post it)" if p["status"] == HANDED_OFF else (" (manual reminder)" if p.get("method") == "manual" else "")
             ex = (p["caption"] or "(Story)").replace("\n", " ")[:60]
-            lines.append(f"- {p['platform']} {p['kind']} {self._fmt(parse_iso(p['publish_at']), now)}{tag} “{ex}” [{p['id']}]")
+            lines.append(f"- {p['platform']} {p['kind']} {self.fmt(parse_iso(p['publish_at']), now)}{tag} “{ex}” [{p['id']}]")
         return "\n".join(lines)
 
     def weekly_review(self) -> str:
         now = self.clock()
         since = now - timedelta(days=7)
-        posts = self.store.list_posts([PUBLISHED, FAILED], limit=200, newest_first=True)
+        posts = self.store.list_posts([PUBLISHED, FAILED, HANDED_OFF], limit=200, newest_first=True)
         week = [p for p in posts if parse_iso(p["publish_at"]) >= since]
         done = [p for p in week if p["status"] == PUBLISHED]
         failed = [p for p in week if p["status"] == FAILED]
+        waiting = [p for p in week if p["status"] == HANDED_OFF]
         by: dict[str, int] = {}
         for p in done:
             by[f"{p['platform']} {p['kind']}"] = by.get(f"{p['platform']} {p['kind']}", 0) + 1
         lines = ["📊 Weekly feed review", f"Published {len(done)} post(s) this week" +
                  (": " + ", ".join(f"{v}× {k}" for k, v in sorted(by.items())) if by else ".")]
+        if waiting:
+            lines.append(f"⏳ {len(waiting)} hand-off(s) not confirmed yet: tap “I posted it” on the reminder, or /queue.")
         if failed:
             lines.append(f"⚠️ {len(failed)} failed - see /queue or ask me to retry.")
         status = feed.pillar_status(self.brand, posts)
@@ -396,10 +355,10 @@ class Pipeline:
         context = "\n\n".join(x for x in [self.queue_text(), "Recent feed:\n" + feed.feed_summary(
             self.store.list_posts(feed.LIVE_STATUSES, limit=12, newest_first=True), self.clock(), self.zone),
             "Trends:\n" + self.trends.trends_for_prompt(6)] if x)
-        return self.planner.llm.text(
+        return self.trends.llm.text(
             system=("You are the owner's Instagram + TikTok account manager. Answer briefly and practically. You can "
                     "advise on content, captions, trends and the queue, but you cannot post: tell them to send media or "
-                    "use commands (/queue, /trends, /cancel <id>) when action is needed.\n\n"
+                    "use commands (/queue, /drafts, /trends, /cancel <id>) when action is needed.\n\n"
                     f"BRAND BRIEF:\n{self.brand.prompt_block()}"),
             content=f"{context}\n\nOwner says: {text}")
 

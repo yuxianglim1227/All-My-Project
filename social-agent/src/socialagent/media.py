@@ -109,9 +109,11 @@ def probe(path: str | Path) -> MediaItem:
     fmt_name = (info.get("format") or {}).get("format_name", "")
     is_image = path.suffix.lower() in IMAGE_EXTS or fmt_name == "image2" or fmt_name.endswith("_pipe")
     duration = 0.0 if is_image else float((info.get("format") or {}).get("duration") or vstream.get("duration") or 0)
-    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    astream = next((s for s in streams if s.get("codec_type") == "audio"), None)
     return MediaItem(path=str(path), kind="image" if is_image else "video", width=width, height=height,
-                     duration=duration, has_audio=has_audio)
+                     duration=duration, has_audio=astream is not None, vcodec=str(vstream.get("codec_name") or ""),
+                     acodec=str((astream or {}).get("codec_name") or ""), container=fmt_name,
+                     size=int((info.get("format") or {}).get("size") or path.stat().st_size))
 
 
 def _rotation(vstream: dict) -> int:
@@ -349,4 +351,50 @@ def prepare_video(src: str | Path, dst: str | Path, *, trim_start: float = 0.0, 
                 "-r", "30", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-movflags", "+faststart",
                 str(dst.resolve())]
         _run(cmd, cwd=tmp)
+    return dst
+
+
+# ---------------------------------------------------------------------------
+# "Compliance only" preparation (EDIT_LEVEL=none): originals pass through untouched unless a platform
+# would reject them. Nothing creative happens here - no trims, no text, no reframing beyond what the API requires.
+# ---------------------------------------------------------------------------
+IG_FEED_MIN_RATIO, IG_FEED_MAX_RATIO = 0.8, 1.91
+JPEG_EXTS = {".jpg", ".jpeg"}
+MP4_EXTS = {".mp4", ".m4v"}
+
+
+def compliant_image(src: str | Path, dst: str | Path, *, ig_feed: bool = False) -> Path:
+    """JPEG the platform will accept. Already-JPEG files are copied byte-for-byte."""
+    src, dst = Path(src), Path(dst)
+    item = probe(src)
+    ratio = item.width / item.height if item.height else 1.0
+    if ig_feed and not (IG_FEED_MIN_RATIO <= ratio <= IG_FEED_MAX_RATIO):
+        return prepare_feed_image(src, dst)  # the API rejects these ratios: pad, don't crop
+    if item.vcodec == "mjpeg" and src.suffix.lower() in JPEG_EXTS:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        return dst
+    return prepare_plain_jpeg(src, dst, max_edge=4096)  # PNG / HEIC / WEBP -> JPEG, no downscale below 4096 px
+
+
+def compliant_video(src: str | Path, dst: str | Path, *, max_seconds: float = 90.0) -> Path:
+    """H.264/AAC MP4 within the duration limit. Already-fine files are copied or re-wrapped without re-encoding."""
+    src, dst = Path(src), Path(dst)
+    item = probe(src)
+    if item.kind != "video":
+        raise MediaError(f"{src.name} is not a video")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fine = item.vcodec == "h264" and item.acodec in ("aac", "") and item.duration <= max_seconds + 0.5
+    if fine and src.suffix.lower() in MP4_EXTS:
+        shutil.copyfile(src, dst)
+    elif fine and src.suffix.lower() == ".mov":
+        _run([_FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src.resolve()), "-c", "copy",
+              "-movflags", "+faststart", str(dst.resolve())])
+    else:  # HEVC (iPhone "High Efficiency"), odd containers, over-long clips: transcode, keep framing as shot
+        cmd = [_FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src.resolve())]
+        if item.duration > max_seconds:
+            cmd += ["-t", f"{max_seconds:.2f}"]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-b:a", "128k", "-movflags", "+faststart", str(dst.resolve())]
+        _run(cmd)
     return dst

@@ -10,7 +10,7 @@ from aiohttp import web
 
 from .app import App, build_app
 from .channels.http_api import make_http_app
-from .channels.telegram_bot import TelegramNotifier, build_telegram
+from .channels.telegram_bot import TelegramNotifier, build_telegram, setup_commands
 from .config import Settings
 from .pipeline import ListNotifier
 
@@ -43,10 +43,11 @@ async def run_forever(settings: Settings) -> None:
         await tg.start()
         await tg.updater.start_polling()  # type: ignore[union-attr]
         notifier.attach(tg.bot, loop)  # type: ignore[union-attr]
+        await setup_commands(tg.bot)  # type: ignore[union-attr]
         if settings.owner_telegram_id is None:
             log.warning("OWNER_TELEGRAM_ID is not set: message the bot /start to learn your id, then set it and restart.")
         else:
-            notifier.notify("🟢 Social manager online" + (" (🧪 DRY RUN)" if settings.dry_run else "") + ". Send me a photo or video!")
+            notifier.notify("🟢 Social manager online" + (" (🧪 DRY RUN)" if settings.dry_run else "") + ". Send me a photo or video and I'll draft it.")
     else:
         log.warning("TELEGRAM_BOT_TOKEN not set: only the HTTP API is active.")
 

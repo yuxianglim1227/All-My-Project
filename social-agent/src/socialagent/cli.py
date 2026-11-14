@@ -25,11 +25,28 @@ from .runtime import run_forever
 
 
 class PrintNotifier:
+    def __init__(self) -> None:
+        self.quiet = False  # while True, cards are remembered but not printed (the `draft` command prints the final one)
+        self.last_card = None
+        self._n = 0
+
     def notify(self, text: str, *, actions: list[tuple[str, str]] | None = None) -> None:
         print(text)
         if actions:
             print("   [" + " | ".join(f"{label} → {data}" for label, data in actions) + "]")
         print()
+
+    def present(self, card, *, handle: str | None = None) -> str:
+        self.last_card = card
+        if not self.quiet:
+            print(card.flat_text())
+            print()
+        if handle is None:
+            self._n += 1
+        return handle or f"cli{self._n}"
+
+    def send_files(self, paths: list[str], caption: str = "") -> None:
+        print(f"(files to send: {', '.join(paths)}) {caption}")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -38,12 +55,23 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run", help="start Telegram bot + HTTP server + scheduler")
-    s = sub.add_parser("submit", help="plan/schedule media from files (like sending it to the bot)")
+    s = sub.add_parser("submit", help="create a DRAFT from files (like sending them to the bot); nothing posts until approved")
     s.add_argument("files", nargs="+")
     s.add_argument("-i", "--instruction", default="")
+    s.add_argument("--approve", action="store_true", help="also approve the draft (schedules it)")
+    sub.add_parser("drafts", help="list open drafts")
+    d = sub.add_parser("draft", help="show or change a draft: tone, language, targets, captions, approve, discard")
+    d.add_argument("draft_id")
+    d.add_argument("--tone"); d.add_argument("--lang")
+    d.add_argument("--toggle", action="append", default=[], metavar="TARGET_ID", help="turn a target on/off (t1, t2, ...)")
+    d.add_argument("--change", help="rewrite with this instruction")
+    d.add_argument("--caption", help="use this exact caption")
+    d.add_argument("--approve", action="store_true"); d.add_argument("--now", action="store_true", help="approve and post ASAP (after the undo window)")
+    d.add_argument("--confirm", action="store_true", help="confirm a risk-flagged draft")
+    d.add_argument("--discard", action="store_true")
     sub.add_parser("queue", help="show scheduled posts")
     sub.add_parser("tick", help="publish anything that is due, run one scheduler tick")
-    for name in ("cancel", "approve", "retry"):
+    for name in ("cancel", "retry"):
         c = sub.add_parser(name, help=f"{name} a post by id")
         c.add_argument("post_id")
     t = sub.add_parser("trends", help="show current trends")
@@ -124,12 +152,19 @@ def _dispatch(args: argparse.Namespace, app: App, settings: Settings, http: http
             dest = settings.inbox_dir / f"cli-{f.name}"
             shutil.copyfile(f, dest)
             copies.append(dest)
-        return 0 if pipe.submit(copies, args.instruction, "cli") else 1
+        did = app.drafts.create(copies, args.instruction, "cli")
+        if did and args.approve:
+            app.drafts.approve(did)
+        return 0 if did else 1
+    if args.cmd == "drafts":
+        app.drafts.list_open()
+    elif args.cmd == "draft":
+        return _draft_command(args, app)
     if args.cmd == "queue":
         print(pipe.queue_text())
     elif args.cmd == "tick":
         print(app.scheduler.tick())
-    elif args.cmd in ("cancel", "approve", "retry"):
+    elif args.cmd in ("cancel", "retry"):
         return 0 if getattr(pipe, args.cmd)(args.post_id) else 1
     elif args.cmd == "trends":
         if args.refresh:
@@ -154,6 +189,36 @@ def _dispatch(args: argparse.Namespace, app: App, settings: Settings, http: http
         return _selfcheck(app, settings, args.claude)
     elif args.cmd == "auth":
         return _auth(args, app, settings, http)
+    return 0
+
+
+def _draft_command(args: argparse.Namespace, app: App) -> int:
+    d = app.drafts
+    if app.store.get_draft(args.draft_id) is None:
+        print(f"No draft [{args.draft_id}].", file=sys.stderr)
+        return 1
+    notifier = app.pipeline.notifier
+    quiet = getattr(notifier, "quiet", None) is not None
+    if quiet:
+        notifier.quiet = True
+    if args.tone:
+        d.set_tone(args.draft_id, args.tone)
+    if args.lang:
+        d.set_language(args.draft_id, args.lang)
+    for tid in args.toggle:
+        d.toggle_target(args.draft_id, tid)
+    if args.change:
+        d.rewrite(args.draft_id, args.change)
+    if args.caption:
+        d.set_caption(args.draft_id, args.caption)
+    if args.discard:
+        d.discard(args.draft_id)
+    elif args.approve or args.now:
+        d.approve(args.draft_id, now=args.now, confirmed=args.confirm)
+    if quiet:
+        notifier.quiet = False
+        card = notifier.last_card
+        print((card or d.card(args.draft_id)).flat_text())
     return 0
 
 
@@ -183,6 +248,13 @@ def _selfcheck(app: App, settings: Settings, live_claude: bool) -> int:
     for pub in app.publishers.values():
         for line in pub.selfcheck():
             add(False if "FAILED" in line else (None if ("WARNING" in line or "dry-run" in line or "NOTE" in line) else True), line)
+    add(True, f"publishing method now: instagram={app.prefs.method('instagram')}, tiktok={app.prefs.method('tiktok')} "
+              "(manual = the bot sends a ready-to-post package; change with /settings)")
+    if app.pipeline.manual is not None:
+        for line in app.pipeline.manual.selfcheck():
+            add(True, line)
+    add(None if settings.edit_level == "none" else True,
+        f"EDIT_LEVEL={settings.edit_level}" + (" (Phase 1: originals only, no creative editing)" if settings.edit_level == "none" else ""))
     if live_claude:
         try:
             add(True, f"Claude replied: {app.llm.text(system='Reply with the single word OK.', content='ping', max_tokens=50)[:40]!r}")

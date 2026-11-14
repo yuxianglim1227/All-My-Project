@@ -18,7 +18,7 @@ AUTH = {"Authorization": "Bearer s3cret"}
 async def rig(tmp_path):
     app, notifier, llm = make_app(tmp_path)
     submitted = []
-    app.pipeline.submit = lambda paths, instruction="", source="cli": submitted.append((list(paths), instruction, source))
+    app.drafts.create = lambda paths, instruction="", source="cli", handle=None: submitted.append((list(paths), instruction, source))
     client = TestClient(TestServer(make_http_app(app)))
     await client.start_server()
     yield client, app, submitted

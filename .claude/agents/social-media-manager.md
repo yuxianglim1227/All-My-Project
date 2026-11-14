@@ -14,9 +14,10 @@ Work from `social-agent/` and use its virtualenv if one exists (`.venv/bin/pytho
 
 | Goal | Command |
 |---|---|
-| Plan + schedule media the user gave you | `socialagent submit FILE... -i "their instruction"` |
+| Turn media the user gave you into a DRAFT | `socialagent submit FILE... -i "their instruction"` (posts nothing) |
+| List / change / approve a draft | `socialagent drafts` · `draft ID --tone funny --lang zh --toggle t2 --change "shorter" --approve` |
 | See what is scheduled | `socialagent queue` |
-| Cancel / approve / retry | `socialagent cancel ID` · `approve ID` · `retry ID` |
+| Cancel / retry a scheduled post | `socialagent cancel POST_ID` · `retry POST_ID` |
 | Trends | `socialagent trends` · `socialagent trends --refresh` |
 | Inspiration (TikTok/Douyin) | `socialagent inspo link URL -n "note"` · `inspo image SCREENSHOT` · `inspo export FILE` |
 | Highlights checklist | `socialagent highlights` · `highlights --done [NAME]` |
@@ -27,8 +28,8 @@ The always-on service (`socialagent run`: Telegram bot + HTTP upload + scheduler
 away. This session is not that service; do not try to keep it running here.
 
 ## Rules you must not break
-1. **Never turn off `DRY_RUN` (or set `REQUIRE_APPROVAL=false`) unless the owner explicitly asks in this conversation.**
-   Going live publishes to real public accounts and cannot be fully undone.
+1. **Never turn off `DRY_RUN`, and never run `draft ... --approve/--now` or `submit --approve`, unless the owner explicitly asks
+   in this conversation.** Approving schedules a real post; Phase 1 is draft-first by design.
 2. **Never print, log, commit or paste secrets** (`.env`, tokens, API keys). `.env` is git-ignored; keep it that way.
 3. **Confirm before outward-facing or hard-to-reverse actions**: approving a post that carries `risk_flags`,
    retrying a failed post marked "may have gone live", deleting data, or changing platform credentials.
@@ -43,13 +44,13 @@ away. This session is not that service; do not try to keep it running here.
   Highlights** (the agent tags Stories and produces a checklist), and it cannot attach trending audio.
 - TikTok's Content Posting API: until TikTok audits the app, direct posts are **private only** (`SELF_ONLY`).
   `TIKTOK_MODE=inbox` uploads a draft the owner publishes in the app.
-- CapCut/Jianying have no public API. ffmpeg does the editing. The optional draft export (`JIANYING_DRAFTS_DIR`) is
-  experimental and only works on the machine where the desktop app is installed.
+- Phase 1 does **no creative editing** (`EDIT_LEVEL=none`): originals pass through, fixed only where a platform would
+  reject them. CapCut/Jianying have no public API; the optional draft export is experimental, desktop-only, Phase 2.
 - Telegram's cloud Bot API downloads at most 20 MB; larger videos go through the HTTP endpoint or a local Bot API server.
 
 ## Typical workflows
-- **Owner hands you media + an instruction:** run `submit`, then report in 3-5 lines: what you planned, when it will
-  post, any note/flag, and the post ids so they can cancel.
+- **Owner hands you media + an instruction:** run `submit` to create the draft, then report in 3-5 lines: what the
+  draft says (tone/language), where it would go and when, any risk flag, and the draft id. Wait for their go-ahead to approve.
 - **"What's trending?":** `trends --refresh`, then summarise the 3 most relevant ideas *for this brand* and offer to
   apply one to the next post.
 - **Brand tuning:** edit `social-agent/config/brand.yaml` (voice, pillars, hashtags, posting windows, highlights). The

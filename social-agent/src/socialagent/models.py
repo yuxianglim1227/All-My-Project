@@ -13,12 +13,19 @@ KINDS: dict[str, set[str]] = {
 }
 
 # Post lifecycle
-PENDING_APPROVAL = "pending_approval"
 SCHEDULED = "scheduled"
 PUBLISHING = "publishing"
 PUBLISHED = "published"
+HANDED_OFF = "handed_off"  # manual method: caption package sent, waiting for the owner to post it
 FAILED = "failed"
 CANCELLED = "cancelled"
+
+# Draft lifecycle
+DRAFTING = "drafting"
+READY = "ready"
+APPROVED = "approved"
+DISCARDED = "discarded"
+DRAFT_FAILED = "failed"
 
 
 @dataclass
@@ -29,6 +36,10 @@ class MediaItem:
     height: int = 0
     duration: float = 0.0
     has_audio: bool = False
+    vcodec: str = ""
+    acodec: str = ""
+    container: str = ""
+    size: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -38,7 +49,8 @@ class MediaItem:
         return cls(
             path=str(d["path"]), kind=str(d["kind"]), width=int(d.get("width", 0)),
             height=int(d.get("height", 0)), duration=float(d.get("duration", 0.0)),
-            has_audio=bool(d.get("has_audio", False)),
+            has_audio=bool(d.get("has_audio", False)), vcodec=str(d.get("vcodec", "")),
+            acodec=str(d.get("acodec", "")), container=str(d.get("container", "")), size=int(d.get("size", 0)),
         )
 
 
@@ -82,6 +94,8 @@ class ContentPlan:
     trend_used: str = ""
     risk_flags: list[str] = field(default_factory=list)
     message_to_owner: str = ""
+    mood: str = ""
+    facts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ContentPlan":
@@ -93,6 +107,7 @@ class ContentPlan:
             trend_used=str(d.get("trend_used", "")),
             risk_flags=[str(r) for r in d.get("risk_flags") or []],
             message_to_owner=str(d.get("message_to_owner", "")),
+            mood=str(d.get("mood", "")), facts=[str(f) for f in d.get("facts") or []],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,5 +207,63 @@ INSPO_SCHEMA: dict[str, Any] = {
         "format_name", "hook", "structure", "visual_style", "text_overlay_style",
         "pacing", "translation", "how_to_recreate",
     ],
+    "additionalProperties": False,
+}
+
+
+# What Claude returns after LOOKING at the media (no captions yet): used once per submission.
+UNDERSTAND_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "pillar": {"type": "string"},
+        "summary": {"type": "string"},
+        "mood": {"type": "string"},
+        "facts": _str_array(),
+        "trend_used": {"type": "string"},
+        "risk_flags": _str_array(),
+        "edit_ideas": {"type": "string"},
+        "targets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "platform": {"type": "string", "enum": list(PLATFORMS)},
+                    "kind": {"type": "string", "enum": ["photo", "carousel", "reel", "story", "video"]},
+                    "media_indexes": {"type": "array", "items": {"type": "integer"}},
+                    "when": {"type": "string"},
+                    "highlight": {"type": "string"},
+                    "why": {"type": "string"},
+                },
+                "required": ["platform", "kind", "media_indexes", "when", "highlight", "why"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["pillar", "summary", "mood", "facts", "trend_used", "risk_flags", "edit_ideas", "targets"],
+    "additionalProperties": False,
+}
+
+# What Claude returns when WRITING captions (text only, no images): used every time the style changes.
+WRITE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "captions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "caption": {"type": "string"},
+                    "hashtags": _str_array(),
+                    "on_screen_text": {"type": "string"},
+                    "when": {"type": "string"},
+                },
+                "required": ["target", "caption", "hashtags", "on_screen_text", "when"],
+                "additionalProperties": False,
+            },
+        },
+        "note": {"type": "string"},
+    },
+    "required": ["captions", "note"],
     "additionalProperties": False,
 }

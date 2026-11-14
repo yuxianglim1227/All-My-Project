@@ -22,9 +22,15 @@ CREATE TABLE IF NOT EXISTS posts (
   caption TEXT NOT NULL, hashtags_json TEXT NOT NULL, media_json TEXT NOT NULL,
   publish_at TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
   remote_id TEXT, permalink TEXT, error TEXT, note TEXT, pillar TEXT, highlight TEXT, why TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, method TEXT NOT NULL DEFAULT 'api'
 );
 CREATE INDEX IF NOT EXISTS idx_posts_due ON posts(status, publish_at);
+CREATE TABLE IF NOT EXISTS drafts (
+  id TEXT PRIMARY KEY, submission_id TEXT NOT NULL, state TEXT NOT NULL, tone TEXT NOT NULL, lang TEXT NOT NULL,
+  instruction TEXT NOT NULL, brief_json TEXT, targets_json TEXT NOT NULL DEFAULT '[]', card_ref TEXT, error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_card ON drafts(card_ref);
 CREATE TABLE IF NOT EXISTS trends (
   id INTEGER PRIMARY KEY AUTOINCREMENT, fetched_at TEXT NOT NULL, platform TEXT NOT NULL,
   name TEXT NOT NULL, data_json TEXT NOT NULL
@@ -105,14 +111,14 @@ class Store:
     # -- posts -------------------------------------------------------------------
     def add_post(self, *, submission_id: str, platform: str, kind: str, caption: str, hashtags: list[str],
                  media: list[dict[str, Any]], publish_at: datetime, status: str, pillar: str = "",
-                 highlight: str = "", why: str = "") -> str:
+                 highlight: str = "", why: str = "", method: str = "api") -> str:
         pid = new_id()
         now = iso(utcnow())
         self._exec(
             "INSERT INTO posts(id,submission_id,platform,kind,caption,hashtags_json,media_json,publish_at,"
-            "status,pillar,highlight,why,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "status,pillar,highlight,why,created_at,updated_at,method) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pid, submission_id, platform, kind, caption, json.dumps(hashtags), json.dumps(media),
-             iso(publish_at), status, pillar, highlight, why, now, now),
+             iso(publish_at), status, pillar, highlight, why, now, now, method),
         )
         return pid
 
@@ -160,15 +166,14 @@ class Store:
         self._exec(f"UPDATE posts SET {', '.join(sets)} WHERE id=?", args)
 
     def cancel_post(self, pid: str) -> bool:
-        cur = self._exec(
-            "UPDATE posts SET status='cancelled', updated_at=? WHERE id=? AND status IN ('scheduled','pending_approval')",
-            (iso(utcnow()), pid))
+        cur = self._exec("UPDATE posts SET status='cancelled', updated_at=? WHERE id=? AND status='scheduled'",
+                         (iso(utcnow()), pid))
         return cur.rowcount == 1
 
-    def approve_post(self, pid: str, publish_at: datetime) -> bool:
-        cur = self._exec(
-            "UPDATE posts SET status='scheduled', publish_at=?, updated_at=? WHERE id=? AND status='pending_approval'",
-            (iso(publish_at), iso(utcnow()), pid))
+    def confirm_posted(self, pid: str) -> bool:
+        """Manual method: the owner says they posted it themselves."""
+        cur = self._exec("UPDATE posts SET status='published', updated_at=? WHERE id=? AND status='handed_off'",
+                         (iso(utcnow()), pid))
         return cur.rowcount == 1
 
     def times_for(self, platform: str, statuses: Iterable[str], kinds: Iterable[str] | None = None) -> list[datetime]:
@@ -180,6 +185,52 @@ class Store:
             sql += f" AND kind IN ({','.join('?' * len(ks))})"
             args += ks
         return [parse_iso(r["publish_at"]) for r in self._rows(sql, args)]
+
+    # -- drafts --------------------------------------------------------------------
+    _DRAFT_FIELDS = {"state", "tone", "lang", "instruction", "card_ref", "error"}
+
+    def add_draft(self, *, submission_id: str, tone: str, lang: str, instruction: str, state: str) -> str:
+        did = new_id()
+        now = iso(utcnow())
+        self._exec("INSERT INTO drafts(id,submission_id,state,tone,lang,instruction,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                   (did, submission_id, state, tone, lang, instruction, now, now))
+        return did
+
+    def get_draft(self, did: str) -> dict[str, Any] | None:
+        rows = self._rows("SELECT * FROM drafts WHERE id=?", (did,))
+        return _decode_draft(rows[0]) if rows else None
+
+    def update_draft(self, did: str, **fields: Any) -> None:
+        sets, args = [], []
+        for k, v in fields.items():
+            if k == "brief":
+                sets.append("brief_json=?")
+                args.append(json.dumps(v))
+            elif k == "targets":
+                sets.append("targets_json=?")
+                args.append(json.dumps(v))
+            elif k in self._DRAFT_FIELDS:
+                sets.append(f"{k}=?")
+                args.append(v)
+            else:
+                raise KeyError(k)
+        sets.append("updated_at=?")
+        args += [iso(utcnow()), did]
+        self._exec(f"UPDATE drafts SET {', '.join(sets)} WHERE id=?", args)
+
+    def list_drafts(self, states: Iterable[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM drafts WHERE 1=1", []
+        if states:
+            st = list(states)
+            sql += f" AND state IN ({','.join('?' * len(st))})"
+            args += st
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(limit)
+        return [_decode_draft(r) for r in self._rows(sql, args)]
+
+    def find_draft_by_card(self, ref: str) -> dict[str, Any] | None:
+        rows = self._rows("SELECT * FROM drafts WHERE card_ref=? ORDER BY updated_at DESC LIMIT 1", (ref,))
+        return _decode_draft(rows[0]) if rows else None
 
     # -- trends / inspiration ------------------------------------------------------
     def replace_trends(self, items: list[dict[str, Any]]) -> None:
@@ -233,4 +284,10 @@ class Store:
 def _decode_post(row: dict[str, Any]) -> dict[str, Any]:
     row["hashtags"] = json.loads(row.pop("hashtags_json") or "[]")
     row["media"] = json.loads(row.pop("media_json") or "[]")
+    return row
+
+
+def _decode_draft(row: dict[str, Any]) -> dict[str, Any]:
+    row["brief"] = json.loads(row.pop("brief_json") or "null")
+    row["targets"] = json.loads(row.pop("targets_json") or "[]")
     return row

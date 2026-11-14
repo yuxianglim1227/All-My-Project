@@ -28,6 +28,7 @@ class PublishResult:
     remote_id: str
     permalink: str = ""
     note: str = ""
+    handed_off: bool = False  # manual method: nothing was published, the owner will post it
 
 
 class PublishError(RuntimeError):

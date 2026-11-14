@@ -87,12 +87,12 @@ class Settings:
 
     # safety
     dry_run: bool = True
-    require_approval: bool = False
     undo_window_seconds: int = 120
-    collect_window_seconds: int = 8
+    collect_window_seconds: int = 3
 
     # claude
-    claude_model: str = "claude-opus-5-5"
+    claude_model: str = "claude-opus-5-5"  # looks at the media (vision)
+    writer_model: str = ""  # writes/rewrites captions (text only); empty = same as claude_model
     claude_effort: str = "medium"
     claude_fallbacks: bool = True
 
@@ -119,7 +119,8 @@ class Settings:
     tiktok_mode: str = "direct"
     tiktok_privacy: str = "SELF_ONLY"
 
-    # editing
+    # editing: none = originals (format fixes only), fit = + reframe to 9:16 / 4:5, creative = + trims & hook text
+    edit_level: str = "none"
     ffmpeg_bin: str = ""
     ffprobe_bin: str = ""
     max_reel_seconds: int = 90
@@ -133,6 +134,9 @@ class Settings:
         mode = _str(e.get("TIKTOK_MODE"), "direct").lower()
         if mode not in {"direct", "inbox"}:
             raise ValueError("TIKTOK_MODE must be 'direct' or 'inbox'")
+        edit_level = _str(e.get("EDIT_LEVEL"), "none").lower()
+        if edit_level not in {"none", "fit", "creative"}:
+            raise ValueError("EDIT_LEVEL must be none, fit or creative")
         effort = _str(e.get("CLAUDE_EFFORT"), "medium").lower()
         if effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError("CLAUDE_EFFORT must be low|medium|high|xhigh|max")
@@ -141,10 +145,10 @@ class Settings:
             brand_file=Path(_str(e.get("BRAND_FILE"), "./config/brand.yaml")),
             timezone=_str(e.get("TIMEZONE"), "UTC"),
             dry_run=_bool(e.get("DRY_RUN"), True),
-            require_approval=_bool(e.get("REQUIRE_APPROVAL"), False),
             undo_window_seconds=_int(e.get("UNDO_WINDOW_SECONDS"), 120),
-            collect_window_seconds=_int(e.get("COLLECT_WINDOW_SECONDS"), 8),
+            collect_window_seconds=_int(e.get("COLLECT_WINDOW_SECONDS"), 3),
             claude_model=_str(e.get("CLAUDE_MODEL"), "claude-opus-5-5"),
+            writer_model=_str(e.get("WRITER_MODEL")),
             claude_effort=effort,
             claude_fallbacks=_bool(e.get("CLAUDE_FALLBACKS"), True),
             telegram_token=_str(e.get("TELEGRAM_BOT_TOKEN")),
@@ -164,6 +168,7 @@ class Settings:
             tiktok_refresh_token=_str(e.get("TIKTOK_REFRESH_TOKEN")),
             tiktok_mode=mode,
             tiktok_privacy=_str(e.get("TIKTOK_PRIVACY"), "SELF_ONLY").upper(),
+            edit_level=edit_level,
             ffmpeg_bin=_str(e.get("FFMPEG_BIN")),
             ffprobe_bin=_str(e.get("FFPROBE_BIN")),
             max_reel_seconds=_int(e.get("MAX_REEL_SECONDS"), 90),
@@ -218,7 +223,9 @@ class BrandProfile:
     audience: str = ""
     region: str = "Global"
     voice: str = ""
-    languages: dict[str, list[str]] = field(default_factory=lambda: {"instagram": ["en"], "tiktok": ["en"]})
+    default_tone: str = "descriptive"
+    default_language: str = "en"
+    custom_tones: list[dict[str, Any]] = field(default_factory=list)
     pillars: list[Pillar] = field(default_factory=list)
     dos: list[str] = field(default_factory=list)
     donts: list[str] = field(default_factory=list)
@@ -240,7 +247,9 @@ class BrandProfile:
             audience=str(d.get("audience") or ""),
             region=str(d.get("region") or "Global"),
             voice=" ".join(str(d.get("voice") or "").split()),
-            languages={k: list(v) for k, v in (d.get("languages") or {}).items()} or {"instagram": ["en"], "tiktok": ["en"]},
+            default_tone=str((d.get("defaults") or {}).get("tone") or "descriptive"),
+            default_language=str((d.get("defaults") or {}).get("language") or "en"),
+            custom_tones=[dict(t) for t in (d.get("tones") or []) if isinstance(t, Mapping)],
             pillars=[Pillar(str(p.get("name")), float(p.get("weight") or 0), str(p.get("description") or ""))
                      for p in (d.get("pillars") or []) if p.get("name")],
             dos=[str(x) for x in d.get("dos") or []],
@@ -285,7 +294,7 @@ class BrandProfile:
             f"Audience: {self.audience}",
             f"Region: {self.region}",
             f"Voice: {self.voice}",
-            "Caption languages: " + "; ".join(f"{k}={'+'.join(v)}" for k, v in self.languages.items()),
+            f"Default caption style: tone={self.default_tone}, language={self.default_language} (the owner can change it per post)",
             "Content pillars (target mix): "
             + "; ".join(f"{p.name} {p.weight:g}% ({p.description})" for p in self.pillars),
             "Do: " + " | ".join(self.dos),

@@ -83,14 +83,14 @@ def make_http_app(app: App) -> web.Application:
                 saved.append(dest)
         if not saved:
             raise web.HTTPBadRequest(text='send at least one file in the multipart field "file"')
-        task = asyncio.create_task(asyncio.to_thread(app.pipeline.submit, list(saved), instruction, "http"))
+        task = asyncio.create_task(asyncio.to_thread(app.drafts.create, list(saved), instruction, "http"))
         background.add(task)
         task.add_done_callback(background.discard)
         return web.json_response({"status": "accepted", "files": len(saved)}, status=202)
 
     async def queue(request: web.Request) -> web.Response:
         guard(request)
-        rows = app.store.list_posts(["scheduled", "pending_approval", "publishing"], limit=50)
+        rows = app.store.list_posts(["scheduled", "publishing", "handed_off"], limit=50)
         return web.json_response([{k: r[k] for k in ("id", "platform", "kind", "status", "publish_at", "caption")} for r in rows])
 
     web_app.router.add_get("/healthz", healthz)

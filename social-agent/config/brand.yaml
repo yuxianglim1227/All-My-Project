@@ -9,11 +9,16 @@ voice: >
   Warm, witty and concise. Sounds like a real person, never like an ad.
   Short punchy first lines. Uses emoji sparingly (max 2 per caption).
 
-# Which language(s) to write captions in, per platform. Several = bilingual caption.
-languages:
-  instagram: ["en"]
-  tiktok: ["en"]
-  # Example bilingual: ["en", "zh"]
+# Defaults for every new draft. You can change them per draft with the buttons, or for good with /settings.
+#   tone:     descriptive | funny | aesthetic | storytelling | informative | hype   (or one you define below)
+#   language: en | zh (简体中文) | zh-hant (繁體中文) | bi (English + 中文)
+defaults:
+  tone: descriptive
+  language: en
+
+# Optional: add your own tones (they appear as buttons) or override a built-in one by reusing its key.
+# tones:
+#   - { key: sassy, label: "Sassy", emoji: "💅", guidance: "Confident, teasing, a little dramatic; never mean." }
 
 # Content pillars: the agent balances your feed across these using "weight" (% target mix).
 pillars:

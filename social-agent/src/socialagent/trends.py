@@ -105,7 +105,7 @@ class TrendResearcher:
                 t["sources"] = []
         self.store.replace_trends(items)
         self.store.kv_set("trends_live", "1" if live else "0")
-        self.store.kv_set("trends_refreshed_at", iso(utcnow()))
+        self.store.kv_set("trends_refreshed_at", iso(today))  # the injected clock, not the wall clock
         return items
 
     def is_stale(self, now: datetime, max_age_hours: float = 20) -> bool:

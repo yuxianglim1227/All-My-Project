@@ -180,3 +180,64 @@ def test_media_host_publish_resolve_cleanup(tmp_path):
     assert host.resolve(token, name) is None
     with pytest.raises(FileNotFoundError):
         host.publish(tmp_path / "ghost.mp4")
+
+
+# ---------------------------------------------------------------- Phase 1: compliance-only preparation
+def _ff(*args):
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args], check=True)
+
+
+def test_probe_reports_codecs_container_and_size(media_dir):
+    v = media.probe(media_dir / "landscape.mp4")
+    assert (v.vcodec, v.acodec) == ("h264", "aac") and "mp4" in v.container and v.size > 1000
+    s = media.probe(media_dir / "portrait_silent.mp4")
+    assert (s.vcodec, s.acodec) == ("h264", "")
+    assert media.probe(media_dir / "photo.jpg").vcodec == "mjpeg" and media.probe(media_dir / "wide.png").vcodec == "png"
+
+
+def test_compliant_image_copies_jpeg_untouched_and_converts_the_rest(media_dir, tmp_path):
+    out = media.compliant_image(media_dir / "photo.jpg", tmp_path / "a.jpg")
+    assert out.read_bytes() == (media_dir / "photo.jpg").read_bytes()
+    png = media.compliant_image(media_dir / "tall.png", tmp_path / "b.jpg")             # not IG feed: converted, framing kept
+    p = media.probe(png)
+    assert (p.width, p.height, p.vcodec) == (500, 2000, "mjpeg")
+    big = media.probe(media.compliant_image(media_dir / "big.png", tmp_path / "c.jpg"))  # no downscale below 4096 px
+    assert (big.width, big.height) == (4000, 3000)
+
+
+def test_compliant_image_pads_only_feed_photos_outside_the_allowed_ratio(media_dir, tmp_path):
+    padded = media.probe(media.compliant_image(media_dir / "tall.png", tmp_path / "t.jpg", ig_feed=True))
+    assert (padded.width, padded.height) == (1080, 1350)
+    fine = media.compliant_image(media_dir / "photo.jpg", tmp_path / "f.jpg", ig_feed=True)
+    assert fine.read_bytes() == (media_dir / "photo.jpg").read_bytes()                 # square JPEG: left alone
+
+
+def test_compliant_video_copies_fine_files_byte_for_byte(media_dir, tmp_path):
+    out = media.compliant_video(media_dir / "landscape.mp4", tmp_path / "o.mp4", max_seconds=90)
+    assert out.read_bytes() == (media_dir / "landscape.mp4").read_bytes()
+    assert (media.probe(out).width, media.probe(out).height) == (1280, 720)            # never reframed
+
+
+def test_compliant_video_rewraps_mov_without_reencoding(media_dir, tmp_path):
+    mov = tmp_path / "clip.mov"
+    _ff("-i", str(media_dir / "landscape.mp4"), "-c", "copy", str(mov))
+    assert "mov" in media.probe(mov).container
+    out = media.compliant_video(mov, tmp_path / "o.mp4")
+    p = media.probe(out)
+    assert (p.vcodec, p.acodec, p.width, p.height) == ("h264", "aac", 1280, 720) and out.stat().st_size > 0
+
+
+def test_compliant_video_transcodes_what_platforms_reject(media_dir, tmp_path):
+    odd = tmp_path / "odd.mp4"
+    _ff("-f", "lavfi", "-i", "testsrc=size=640x360:rate=30:duration=2", "-c:v", "mpeg4", str(odd))   # MPEG-4 part 2, not H.264
+    assert media.probe(odd).vcodec == "mpeg4"
+    out = media.compliant_video(odd, tmp_path / "fixed.mp4")
+    p = media.probe(out)
+    assert (p.vcodec, p.width, p.height) == ("h264", 640, 360)                          # codec fixed, framing as shot
+
+
+def test_compliant_video_enforces_the_duration_limit(media_dir, tmp_path):
+    out = media.compliant_video(media_dir / "landscape.mp4", tmp_path / "short.mp4", max_seconds=1.5)
+    assert media.probe(out).duration <= 2.0
+    with pytest.raises(media.MediaError):
+        media.compliant_video(media_dir / "photo.jpg", tmp_path / "x.mp4")

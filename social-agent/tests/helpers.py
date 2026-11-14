@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from fakes import FakeLLM
-from socialagent.brain import Planner
+from socialagent.brain import Understander, Writer
+from socialagent.drafts import DraftService
 from socialagent.config import BrandProfile, Settings
 from socialagent.hosting import MediaHost
 from socialagent.pipeline import ListNotifier, Pipeline
-from socialagent.publishers import PublishError, PublishRequest, PublishResult
+from socialagent.prefs import Prefs
+from socialagent.publishers import ManualPublisher, PublishError, PublishRequest, PublishResult
+from socialagent.styles import StyleCatalog
 from socialagent.scheduler import Scheduler
 from socialagent.store import Store
 from socialagent.trends import TrendResearcher
@@ -73,6 +76,8 @@ def fatal(msg="nope"):
 @dataclass
 class Rig:
     pipeline: Pipeline
+    drafts: DraftService
+    prefs: Prefs
     notifier: ListNotifier
     store: Store
     llm: FakeLLM
@@ -81,6 +86,17 @@ class Rig:
     scheduler: Scheduler
     host: MediaHost
     publishers: dict[str, Any] = field(default_factory=dict)
+
+    def submit(self, paths, instruction: str = "", *, approve: bool = True, now: bool = False, confirmed: bool = False):
+        """Send media through the draft flow; by default also tap Approve. Returns the draft id."""
+        did = self.drafts.create(list(paths), instruction, "test")
+        if did and approve:
+            self.drafts.approve(did, now=now, confirmed=confirmed)
+        return did
+
+    @property
+    def sid(self) -> str:
+        return self.store.list_drafts(limit=1)[0]["submission_id"]
 
 
 def make_rig(tmp_path: Path, *, env: dict[str, str] | None = None, publishers: dict[str, Any] | None = None,
@@ -94,14 +110,17 @@ def make_rig(tmp_path: Path, *, env: dict[str, str] | None = None, publishers: d
     brand = brand or BrandProfile.load(brand_file)
     store, llm, clock = Store(":memory:"), FakeLLM(), Clock()
     trends = TrendResearcher(llm, store, brand)
-    planner = Planner(llm, brand, settings.data_dir / "work")
     host = MediaHost(settings.public_dir, settings.public_base_url)
     notifier = ListNotifier()
     pubs = publishers if publishers is not None else {"instagram": ScriptedPublisher("instagram"), "tiktok": ScriptedPublisher("tiktok")}
-    pipeline = Pipeline(settings=settings, brand=brand, store=store, planner=planner, trends=trends, publishers=pubs,
-                        host=host, notifier=notifier, clock=clock, rng=ZeroRng(), draft_maker=draft_maker)
+    pipeline = Pipeline(settings=settings, brand=brand, store=store, trends=trends, publishers=pubs, host=host, notifier=notifier,
+                        manual=ManualPublisher(notifier), clock=clock, rng=ZeroRng(), draft_maker=draft_maker)
+    catalog = StyleCatalog.from_brand(brand.custom_tones)
+    prefs = Prefs(store, brand, catalog, lambda platform: True)   # tests default to the API method
+    drafts = DraftService(settings=settings, store=store, pipeline=pipeline, understander=Understander(llm, brand, settings.data_dir / "work"),
+                          writer=Writer(llm, brand), prefs=prefs, catalog=catalog, notifier=notifier)
     scheduler = Scheduler(pipeline=pipeline, trends=trends, store=store, clock=clock)
-    return Rig(pipeline, notifier, store, llm, clock, settings, scheduler, host, pubs)
+    return Rig(pipeline, drafts, prefs, notifier, store, llm, clock, settings, scheduler, host, pubs)
 
 
 def one_post(platform="instagram", kind="photo", **kw) -> dict[str, Any]:
