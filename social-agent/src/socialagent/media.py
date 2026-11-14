@@ -113,7 +113,8 @@ def probe(path: str | Path) -> MediaItem:
     return MediaItem(path=str(path), kind="image" if is_image else "video", width=width, height=height,
                      duration=duration, has_audio=astream is not None, vcodec=str(vstream.get("codec_name") or ""),
                      acodec=str((astream or {}).get("codec_name") or ""), container=fmt_name,
-                     size=int((info.get("format") or {}).get("size") or path.stat().st_size))
+                     size=int((info.get("format") or {}).get("size") or path.stat().st_size),
+                     hdr=str(vstream.get("color_transfer") or "") in {"arib-std-b67", "smpte2084"})
 
 
 def _rotation(vstream: dict) -> int:

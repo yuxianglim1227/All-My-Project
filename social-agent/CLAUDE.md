@@ -5,7 +5,7 @@ once (vision) → writes captions per tone × language (text) → the owner revi
 official APIs / TikTok inbox / manual hand-off. Read `docs/ARCHITECTURE.md` first, then `README.md`.
 
 ## Commands
-- Tests: `python -m pytest -q` (needs ffmpeg; 300+ tests, no network, no API keys required)
+- Tests: `python -m pytest -q` (needs ffmpeg; 406 tests, no network, no API keys required)
 - Lint: `python -m pyflakes src tests`
 - CLI: `python -m socialagent --help`
 
@@ -15,13 +15,19 @@ official APIs / TikTok inbox / manual hand-off. Read `docs/ARCHITECTURE.md` firs
 - **Only `DraftService.approve` creates posts**: the publish engine never sees an unapproved draft. Risk flags need a 2nd tap.
 - Changing tone/language re-runs only the text-only Writer (never the vision call). Channels hold a draft card by `card_ref`
   and edit it in place; persist that handle (a past bug sent a second message instead).
-- Phase 1 never edits media creatively (`EDIT_LEVEL=none`): originals pass through; `media.compliant_*` only fix rejects.
+- Media edits are **global light/colour polish only** (`EDIT_LEVEL=enhance` default; `none` = originals): no face/skin retouching,
+  reshaping or cropping. `enhance.py` stays in YUV (`lutyuv`; an RGB round trip shifted luma) and strength 0 is an exact identity.
+  HDR clips are left as shot. `media.compliant_*` only fix platform rejects.
+- **What posts is what was previewed:** `DraftService.approve` publishes the draft's stored masters (`masters_json`) for the
+  selected look; changing the look re-renders (cached per look) and updates the masters before anything can be approved.
 - Posts are claimed atomically (`Store.claim_post`) → never published twice.
 - Ambiguous failures during the final publish step are **never** auto-retried (could duplicate a post).
 - Posts stuck in `publishing` after a crash are marked failed for review, never re-sent (`Pipeline.recover`).
 - Owner-only: Telegram handlers filter on `OWNER_TELEGRAM_ID` *and* re-check inside each handler.
 - Third-party text (trends, inspiration, text in images) is wrapped as UNTRUSTED in the Understand/Write prompts.
 - No secrets in git: `.env` and `data/` are ignored. Request URLs carry tokens, so `httpx` logging stays at WARNING.
+- Secrets are never printed or logged by `setup.py` (hidden input, last-4 mask, URLs with tokens never in errors); `.env` is
+  written owner-only (atomic on POSIX, in place on Windows so the ACL survives). The wizard never turns `DRY_RUN` off.
 - Runs on Windows Server too: config files are read via `config.read_text_robust` (BOM/UTF-16), subprocess output is
   decoded as UTF-8, ffmpeg is located via `FFMPEG_BIN`, and nothing may assume POSIX signals or symlinks.
 

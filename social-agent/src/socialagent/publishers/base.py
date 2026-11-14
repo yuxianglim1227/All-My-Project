@@ -12,6 +12,7 @@ class PreparedMedia:
     kind: str  # "image" | "video"
     duration: float = 0.0
     url: str = ""  # public URL, filled in by the pipeline when the publisher needs one
+    edited: bool = False  # an enhanced master (not the owner's original): manual hand-off must send it back
 
 
 @dataclass

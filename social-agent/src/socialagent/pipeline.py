@@ -139,6 +139,7 @@ class Pipeline:
         out = self.settings.prepared_dir / sid / f"{n}-{t['platform']}-{t['kind']}"
         out.mkdir(parents=True, exist_ok=True)
         level, font = self.settings.edit_level, self.settings.font_path
+        light = level in ("none", "enhance")  # originals / already-enhanced masters: only fix what a platform would reject
         overlay = t.get("on_screen_text", "") if level == "creative" else ""
         if overlay and not media_mod.find_font(overlay, font):
             notes.append("I couldn't add the on-screen text: no suitable font is installed (CJK text needs e.g. fonts-noto-cjk).")
@@ -151,32 +152,32 @@ class Pipeline:
                 for j, it in enumerate(sel):
                     dst = out / (f"{j}.jpg" if kind == "carousel" else "photo.jpg")
                     if it.kind == "image":
-                        files.append(media_mod.compliant_image(it.path, dst, ig_feed=True) if level == "none"
+                        files.append(media_mod.compliant_image(it.path, dst, ig_feed=True) if light
                                      else media_mod.prepare_feed_image(it.path, dst))
                     else:  # a video inside a carousel
                         vdst = dst.with_suffix(".mp4")
-                        files.append(media_mod.compliant_video(it.path, vdst, max_seconds=STORY_MAX_SECONDS) if level == "none"
+                        files.append(media_mod.compliant_video(it.path, vdst, max_seconds=STORY_MAX_SECONDS) if light
                                      else media_mod.prepare_video(it.path, vdst, max_seconds=STORY_MAX_SECONDS, width=1080, height=1350))
             elif kind == "reel":
-                files = [media_mod.compliant_video(sel[0].path, out / "reel.mp4", max_seconds=max_reel) if level == "none"
+                files = [media_mod.compliant_video(sel[0].path, out / "reel.mp4", max_seconds=max_reel) if light
                          else media_mod.prepare_video(sel[0].path, out / "reel.mp4", max_seconds=max_reel,
                                                       overlay_text=overlay, font_path=font)]
             elif kind == "story":
                 it = sel[0]
                 if it.kind == "image":
-                    files = [media_mod.compliant_image(it.path, out / "story.jpg") if level == "none"
+                    files = [media_mod.compliant_image(it.path, out / "story.jpg") if light
                              else media_mod.prepare_story_image(it.path, out / "story.jpg", overlay_text=overlay, font_path=font)]
                 else:
-                    files = [media_mod.compliant_video(it.path, out / "story.mp4", max_seconds=STORY_MAX_SECONDS) if level == "none"
+                    files = [media_mod.compliant_video(it.path, out / "story.mp4", max_seconds=STORY_MAX_SECONDS) if light
                              else media_mod.prepare_video(it.path, out / "story.mp4", max_seconds=STORY_MAX_SECONDS,
                                                           overlay_text=overlay, font_path=font)]
         else:
             if kind == "video":
-                files = [media_mod.compliant_video(sel[0].path, out / "tiktok.mp4", max_seconds=TIKTOK_MAX_SECONDS) if level == "none"
+                files = [media_mod.compliant_video(sel[0].path, out / "tiktok.mp4", max_seconds=TIKTOK_MAX_SECONDS) if light
                          else media_mod.prepare_video(sel[0].path, out / "tiktok.mp4", max_seconds=TIKTOK_MAX_SECONDS,
                                                       overlay_text=overlay, font_path=font)]
             else:
-                files = [media_mod.compliant_image(it.path, out / f"{j}.jpg") if level == "none"
+                files = [media_mod.compliant_image(it.path, out / f"{j}.jpg") if light
                          else media_mod.prepare_plain_jpeg(it.path, out / f"{j}.jpg") for j, it in enumerate(sel)]
         result = []
         for f in files:
@@ -263,7 +264,9 @@ class Pipeline:
         try:
             if publisher is None:
                 raise PublishError(f"No publisher configured for {platform}.", retryable=False)
-            media = [PreparedMedia(path=m["path"], kind=m["kind"], duration=m.get("duration", 0.0)) for m in post["media"]]
+            drafts_dir = str(self.settings.data_dir / "drafts")
+            media = [PreparedMedia(path=m["path"], kind=m["kind"], duration=m.get("duration", 0.0),
+                                   edited=m["path"].startswith(drafts_dir)) for m in post["media"]]
             if publisher.needs_urls(kind):
                 for m in media:
                     m.url = self.host.publish(m.path)

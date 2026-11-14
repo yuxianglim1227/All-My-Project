@@ -105,7 +105,7 @@ def make_rig(tmp_path: Path, *, env: dict[str, str] | None = None, publishers: d
     brand_file = tmp_path / "brand.yaml"
     shutil.copyfile(ROOT / "config" / "brand.yaml", brand_file)
     settings = Settings.from_env({"DATA_DIR": str(tmp_path / "data"), "BRAND_FILE": str(brand_file), "TIMEZONE": "UTC",
-                                  "PUBLIC_BASE_URL": "https://agent.example", **(env or {})})
+                                  "PUBLIC_BASE_URL": "https://agent.example", "EDIT_LEVEL": "none", **(env or {})})
     settings.ensure_dirs()
     brand = brand or BrandProfile.load(brand_file)
     store, llm, clock = Store(":memory:"), FakeLLM(), Clock()
@@ -114,7 +114,7 @@ def make_rig(tmp_path: Path, *, env: dict[str, str] | None = None, publishers: d
     notifier = ListNotifier()
     pubs = publishers if publishers is not None else {"instagram": ScriptedPublisher("instagram"), "tiktok": ScriptedPublisher("tiktok")}
     pipeline = Pipeline(settings=settings, brand=brand, store=store, trends=trends, publishers=pubs, host=host, notifier=notifier,
-                        manual=ManualPublisher(notifier), clock=clock, rng=ZeroRng(), draft_maker=draft_maker)
+                        manual=ManualPublisher(notifier, host), clock=clock, rng=ZeroRng(), draft_maker=draft_maker)
     catalog = StyleCatalog.from_brand(brand.custom_tones)
     prefs = Prefs(store, brand, catalog, lambda platform: True)   # tests default to the API method
     drafts = DraftService(settings=settings, store=store, pipeline=pipeline, understander=Understander(llm, brand, settings.data_dir / "work"),
@@ -144,7 +144,7 @@ def make_app(tmp_path: Path, *, env: dict[str, str] | None = None, notifier=None
     settings = Settings.from_env({
         "DATA_DIR": str(tmp_path / "data"), "BRAND_FILE": str(brand_file), "TIMEZONE": "UTC", "DRY_RUN": "true",
         "API_TOKEN": "s3cret", "OWNER_TELEGRAM_ID": "42", "TELEGRAM_BOT_TOKEN": "123:abc",
-        "PUBLIC_BASE_URL": "https://agent.example", **(env or {})})
+        "PUBLIC_BASE_URL": "https://agent.example", "EDIT_LEVEL": "none", **(env or {})})
     notifier = notifier or ListNotifier()
     llm = FakeLLM()
     return build_app(settings, notifier, llm=llm), notifier, llm

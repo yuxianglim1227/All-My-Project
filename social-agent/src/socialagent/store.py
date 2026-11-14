@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_posts_due ON posts(status, publish_at);
 CREATE TABLE IF NOT EXISTS drafts (
   id TEXT PRIMARY KEY, submission_id TEXT NOT NULL, state TEXT NOT NULL, tone TEXT NOT NULL, lang TEXT NOT NULL,
   instruction TEXT NOT NULL, brief_json TEXT, targets_json TEXT NOT NULL DEFAULT '[]', card_ref TEXT, error TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, look TEXT NOT NULL DEFAULT 'natural', masters_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_card ON drafts(card_ref);
 CREATE TABLE IF NOT EXISTS trends (
@@ -60,6 +60,14 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Databases created before a column existed get it added (never destructive)."""
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(drafts)").fetchall()}
+        for col, ddl in (("look", "TEXT NOT NULL DEFAULT 'natural'"), ("masters_json", "TEXT")):
+            if col not in have:
+                self._db.execute(f"ALTER TABLE drafts ADD COLUMN {col} {ddl}")
 
     # -- low level ---------------------------------------------------------------
     def _exec(self, sql: str, args: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -187,13 +195,13 @@ class Store:
         return [parse_iso(r["publish_at"]) for r in self._rows(sql, args)]
 
     # -- drafts --------------------------------------------------------------------
-    _DRAFT_FIELDS = {"state", "tone", "lang", "instruction", "card_ref", "error"}
+    _DRAFT_FIELDS = {"state", "tone", "lang", "instruction", "card_ref", "error", "look"}
 
-    def add_draft(self, *, submission_id: str, tone: str, lang: str, instruction: str, state: str) -> str:
+    def add_draft(self, *, submission_id: str, tone: str, lang: str, instruction: str, state: str, look: str = "natural") -> str:
         did = new_id()
         now = iso(utcnow())
-        self._exec("INSERT INTO drafts(id,submission_id,state,tone,lang,instruction,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                   (did, submission_id, state, tone, lang, instruction, now, now))
+        self._exec("INSERT INTO drafts(id,submission_id,state,tone,lang,instruction,created_at,updated_at,look) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (did, submission_id, state, tone, lang, instruction, now, now, look))
         return did
 
     def get_draft(self, did: str) -> dict[str, Any] | None:
@@ -208,6 +216,9 @@ class Store:
                 args.append(json.dumps(v))
             elif k == "targets":
                 sets.append("targets_json=?")
+                args.append(json.dumps(v))
+            elif k == "masters":
+                sets.append("masters_json=?")
                 args.append(json.dumps(v))
             elif k in self._DRAFT_FIELDS:
                 sets.append(f"{k}=?")
@@ -290,4 +301,5 @@ def _decode_post(row: dict[str, Any]) -> dict[str, Any]:
 def _decode_draft(row: dict[str, Any]) -> dict[str, Any]:
     row["brief"] = json.loads(row.pop("brief_json") or "null")
     row["targets"] = json.loads(row.pop("targets_json") or "[]")
+    row["masters"] = json.loads(row.pop("masters_json") or "null")
     return row

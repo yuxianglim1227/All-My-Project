@@ -99,8 +99,8 @@ def test_submit_missing_file_is_a_clean_error(env, capsys):
 
 
 def test_tick_trends_inspo_highlights_review(env, tmp_path, capsys):
+    assert run(["trends"]) == 0 and "No trends yet" in capsys.readouterr().out          # before any tick: a tick may refresh trends after 06:00 UTC
     assert run(["tick"]) == 0 and "published" in capsys.readouterr().out
-    assert run(["trends"]) == 0 and "No trends yet" in capsys.readouterr().out
     assert run(["trends", "--refresh"]) == 0 and "Photo dump" in capsys.readouterr().out
     assert run(["inspo", "link", "https://v.douyin.com/abc/", "-n", "nice"]) == 0
     assert "screenshot" in capsys.readouterr().out
@@ -132,7 +132,7 @@ def test_selfcheck_in_dry_run_passes_with_warnings(env, capsys):
     out = capsys.readouterr().out
     assert "DRY_RUN is ON" in out and "ffmpeg" in out and "ANTHROPIC_API_KEY not set" in out and "brand profile loaded" in out
     assert "publishing method now: instagram=manual, tiktok=manual" in out      # usable before any API setup
-    assert "manual: ready" in out and "EDIT_LEVEL=none (Phase 1" in out
+    assert "manual: ready" in out and "EDIT_LEVEL=enhance (light polish" in out
 
 
 def test_selfcheck_live_reports_platform_failures_with_exit_1(env, monkeypatch, capsys):

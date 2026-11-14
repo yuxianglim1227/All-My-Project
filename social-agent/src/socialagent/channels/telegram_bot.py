@@ -24,13 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, filters)
 
 from ..app import App
-from ..cards import Card
+from ..cards import Card, Preview
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ COMMAND_MENU = [
     ("inspo", "Save a TikTok/Douyin reference"), ("status", "Modes and connections"), ("help", "How this works"),
 ]
 TOASTS = {"tone": "Rewriting…", "lang": "Rewriting…", "rewrite": "Rewriting…", "approve": "Scheduling…",
-          "approve!": "Scheduling…", "now": "Scheduling…", "retry": "Trying again…"}
+          "approve!": "Scheduling…", "now": "Scheduling…", "retry": "Trying again…", "look": "Re-rendering…", "compare": "Rendering…"}
 CARD_PREFIX = {"draft": "d", "settings": "s", "post": "p"}
 
 
@@ -184,6 +184,15 @@ class Collector:
                 log.exception("Collector handler failed")
 
 
+@dataclass
+class _Shown:
+    """The preview messages currently on screen for one card."""
+
+    ids: list[int]
+    fp: str  # fingerprint of the preview files (changes when the media changes)
+    kinds: list[str]
+
+
 class TelegramNotifier:
     """Sends the core's messages and cards to the owner. Safe to call from worker threads (never from the event loop)."""
 
@@ -193,6 +202,7 @@ class TelegramNotifier:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: int | None = None
         self._backlog: list[tuple[str, list[tuple[str, str]] | None]] = []
+        self._shown: dict[str, _Shown] = {}  # card handle -> its preview messages
 
     def attach(self, bot: Any, loop: asyncio.AbstractEventLoop) -> None:
         self._bot, self._loop = bot, loop
@@ -230,33 +240,93 @@ class TelegramNotifier:
             raise RuntimeError("TelegramNotifier.present() would deadlock on the event-loop thread; call it from a worker thread")
         return asyncio.run_coroutine_threadsafe(self._present(card, handle), self._loop).result(timeout=40)
 
-    async def _present(self, card: Card, handle: str | None) -> str:
-        text, markup = render_card(card)
-        text = text[:TG_LIMIT] if len(text) > TG_LIMIT else text
-        if handle:
-            try:
-                await self._bot.edit_message_text(chat_id=self.owner_id, message_id=int(handle), text=text, reply_markup=markup)
-                return handle
-            except BadRequest as exc:
-                if "not modified" in str(exc).lower():  # the owner tapped something that changed nothing
-                    return handle
-                log.info("Could not edit message %s (%s); sending a new one", handle, exc)
-            except (TelegramError, ValueError) as exc:
-                log.info("Could not edit message %s (%s); sending a new one", handle, exc)
+    async def _send_text(self, text: str, markup: Any) -> str:
         sent = await self._bot.send_message(chat_id=self.owner_id, text=text, reply_markup=markup)
         return str(sent.message_id)
 
-    def send_files(self, paths: list[str], caption: str = "") -> None:
+    async def _edit_text(self, handle: str, text: str, markup: Any) -> str:
+        try:
+            await self._bot.edit_message_text(chat_id=self.owner_id, message_id=int(handle), text=text, reply_markup=markup)
+            return handle
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():  # the owner tapped something that changed nothing
+                return handle
+            log.info("Could not edit message %s (%s); sending a new one", handle, exc)
+        except (TelegramError, ValueError) as exc:
+            log.info("Could not edit message %s (%s); sending a new one", handle, exc)
+        return await self._send_text(text, markup)
+
+    @staticmethod
+    def _input_media(pv: Preview, caption: str) -> Any:
+        if pv.kind == "image":
+            return InputMediaPhoto(media=Path(pv.path), caption=caption or None)
+        return InputMediaVideo(media=Path(pv.path), caption=caption or None, supports_streaming=True)
+
+    async def _send_previews(self, card: Card) -> list[int]:
+        previews, cap = card.previews[:10], card.preview_caption
+        if len(previews) == 1:
+            pv = previews[0]
+            if pv.kind == "image":
+                m = await self._bot.send_photo(chat_id=self.owner_id, photo=Path(pv.path), caption=cap or None)
+            else:
+                m = await self._bot.send_video(chat_id=self.owner_id, video=Path(pv.path), caption=cap or None, supports_streaming=True)
+            return [m.message_id]
+        msgs = await self._bot.send_media_group(chat_id=self.owner_id, media=[self._input_media(pv, cap if i == 0 else "")
+                                                                               for i, pv in enumerate(previews)])
+        return [m.message_id for m in msgs]
+
+    async def _delete(self, message_id: int) -> None:
+        try:
+            await self._bot.delete_message(chat_id=self.owner_id, message_id=message_id)
+        except TelegramError as exc:
+            log.debug("Could not delete message %s: %s", message_id, exc)
+
+    async def _present(self, card: Card, handle: str | None) -> str:
+        text, markup = render_card(card)
+        text = text[:TG_LIMIT] if len(text) > TG_LIMIT else text
+        if not card.previews:
+            return await self._edit_text(handle, text, markup) if handle else await self._send_text(text, markup)
+
+        fp, kinds = "|".join(p.key for p in card.previews[:10]), [p.kind for p in card.previews[:10]]
+        shown = self._shown.get(handle) if handle else None
+        if shown and shown.fp == fp:  # same media: only the card text changed (tone, language, targets...)
+            return await self._edit_text(handle, text, markup)
+        if shown and shown.kinds == kinds:  # same shape, new media (e.g. another look): swap it in place
+            try:
+                for i, (mid, pv) in enumerate(zip(shown.ids, card.previews)):
+                    await self._bot.edit_message_media(chat_id=self.owner_id, message_id=mid,
+                                                       media=self._input_media(pv, card.preview_caption if i == 0 else ""))
+                shown.fp = fp
+                return await self._edit_text(handle, text, markup)
+            except TelegramError as exc:
+                log.info("Could not swap the preview in place (%s); re-sending it", exc)
+        # First time (or the shape changed): previews first, then the card below them so its buttons stay within reach.
+        ids = await self._send_previews(card)
+        new_handle = await self._send_text(text, markup)
+        stale = [*(shown.ids if shown else []), *([int(handle)] if handle and handle.isdigit() else [])]
+        for mid in stale:
+            await self._delete(mid)
+        if handle:
+            self._shown.pop(handle, None)
+        self._shown[new_handle] = _Shown(ids, fp, kinds)
+        return new_handle
+
+    def send_files(self, paths: list[str], caption: str = "", *, as_photo: bool = False) -> None:
         if self.owner_id is None or self._bot is None or self._loop is None:
             return
 
         async def go() -> None:
             for p in paths:
-                if Path(p).stat().st_size > 49 * 1024 * 1024:  # the cloud Bot API cannot upload more than 50 MB
-                    await self._bot.send_message(chat_id=self.owner_id, text=f"(File too large to send back: {Path(p).name})")
-                    continue
-                with open(p, "rb") as fh:
-                    await self._bot.send_document(chat_id=self.owner_id, document=fh, caption=caption or None)
+                path = Path(p)
+                if path.stat().st_size > 49 * 1024 * 1024:  # the cloud Bot API cannot upload more than 50 MB
+                    await self._bot.send_message(chat_id=self.owner_id, text=f"(File too large to send back: {path.name})")
+                elif as_photo and path.suffix.lower() in {".mp4", ".mov"}:
+                    await self._bot.send_video(chat_id=self.owner_id, video=path, caption=caption or None, supports_streaming=True)
+                elif as_photo:
+                    await self._bot.send_photo(chat_id=self.owner_id, photo=path, caption=caption or None)
+                else:
+                    with open(path, "rb") as fh:
+                        await self._bot.send_document(chat_id=self.owner_id, document=fh, caption=caption or None)
 
         fut = asyncio.run_coroutine_threadsafe(go(), self._loop)
         fut.add_done_callback(lambda f: f.exception() and log.warning("Telegram file send failed: %s", f.exception()))

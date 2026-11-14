@@ -15,14 +15,15 @@ Work from `social-agent/` and use its virtualenv if one exists (`.venv/bin/pytho
 | Goal | Command |
 |---|---|
 | Turn media the user gave you into a DRAFT | `socialagent submit FILE... -i "their instruction"` (posts nothing) |
-| List / change / approve a draft | `socialagent drafts` · `draft ID --tone funny --lang zh --toggle t2 --change "shorter" --approve` |
+| List / change / approve a draft | `socialagent drafts` · `draft ID --tone funny --lang zh --look vivid --toggle t2 --change "shorter" --approve` (looks: natural, vivid, bright, moody, original) |
 | See what is scheduled | `socialagent queue` |
 | Cancel / retry a scheduled post | `socialagent cancel POST_ID` · `retry POST_ID` |
 | Trends | `socialagent trends` · `socialagent trends --refresh` |
 | Inspiration (TikTok/Douyin) | `socialagent inspo link URL -n "note"` · `inspo image SCREENSHOT` · `inspo export FILE` |
 | Highlights checklist | `socialagent highlights` · `highlights --done [NAME]` |
 | Weekly review | `socialagent review` |
-| Health check | `socialagent selfcheck [--claude]` |
+| Health check | `socialagent selfcheck [--live]` (`--live` also pings Claude and Telegram) |
+| First-time setup | `socialagent setup` is **interactive and asks for secrets**: tell the owner to run it in their own terminal; never run it yourself or ask them to paste a key into this chat |
 
 The always-on service (`socialagent run`: Telegram bot + HTTP upload + scheduler) is what posts while the owner is
 away. This session is not that service; do not try to keep it running here.
@@ -44,8 +45,12 @@ away. This session is not that service; do not try to keep it running here.
   Highlights** (the agent tags Stories and produces a checklist), and it cannot attach trending audio.
 - TikTok's Content Posting API: until TikTok audits the app, direct posts are **private only** (`SELF_ONLY`).
   `TIKTOK_MODE=inbox` uploads a draft the owner publishes in the app.
-- Phase 1 does **no creative editing** (`EDIT_LEVEL=none`): originals pass through, fixed only where a platform would
-  reject them. CapCut/Jianying have no public API; the optional draft export is experimental, desktop-only, Phase 2.
+- Media gets only a **global light/colour polish** by default (`EDIT_LEVEL=enhance`: exposure, contrast, shadows, highlights,
+  vibrance, clarity; looks natural/vivid/bright/moody). There is **no face or skin retouching**: never promise it, and never
+  describe the polish as "beautifying people". It was tuned on synthetic images, so the owner should judge the preview. HDR
+  videos are left as shot. `EDIT_LEVEL=none` posts originals. The owner sees the final media in the draft before approving and
+  the approved file is exactly the previewed one. Creative editing (cuts, text, reframing) is Phase 2. CapCut/Jianying have
+  no public API; the optional draft export is experimental and desktop-only.
 - Telegram's cloud Bot API downloads at most 20 MB; larger videos go through the HTTP endpoint or a local Bot API server.
 
 ## Typical workflows

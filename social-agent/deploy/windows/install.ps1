@@ -5,8 +5,11 @@
 
 .DESCRIPTION
   Run from an ELEVATED PowerShell:   .\deploy\windows\install.ps1
-  1st run: creates the virtual environment and a locked-down .env, then stops so you can edit .env.
-  2nd run: runs `socialagent selfcheck`, then registers + starts the "SocialAgent" scheduled task.
+  It creates the virtual environment and a locked-down .env, then runs the guided setup (`socialagent setup`):
+  you paste your Claude key and your Telegram bot token (hidden; checked live before they are saved), message the
+  bot once so it learns your Telegram id, and answer a few questions about the account. Then it runs
+  `socialagent selfcheck --live` and registers + starts the "SocialAgent" scheduled task.
+  Re-run any time: finished steps are skipped (-Reconfigure runs the guided setup again).
 
   NOT TESTED: written without access to a Windows machine. Read it first; every step is also listed
   in README.md so you can run the commands by hand. Safe to re-run.
@@ -14,12 +17,16 @@
 .PARAMETER Python    Path to python.exe (3.10+). Auto-detected if omitted.
 .PARAMETER TaskName  Scheduled-task name (default SocialAgent).
 .PARAMETER SkipTask  Do everything except registering the scheduled task.
+.PARAMETER SkipSetup Do not run the guided setup (you will edit .env yourself).
+.PARAMETER Reconfigure  Run the guided setup again even if .env is already filled in.
 #>
 [CmdletBinding()]
 param(
     [string]$Python = "",
     [string]$TaskName = "SocialAgent",
-    [switch]$SkipTask
+    [switch]$SkipTask,
+    [switch]$SkipSetup,
+    [switch]$Reconfigure
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,23 +65,37 @@ if ($LASTEXITCODE -ne 0) { throw "pip install failed." }
 # --- .env (secrets): readable only by Administrators and SYSTEM -----------------------------------
 # SIDs instead of names so this also works on non-English Windows: S-1-5-32-544 = Administrators, S-1-5-18 = SYSTEM.
 $envFile = Join-Path $root ".env"
-$firstTime = -not (Test-Path $envFile)
-if ($firstTime) { Copy-Item (Join-Path $root ".env.example") $envFile }
-icacls $envFile /inheritance:r /grant:r "*S-1-5-32-544:(F)" "*S-1-5-18:(F)" | Out-Null
-if ($firstTime) {
-    Write-Host ""
-    Write-Host "Created .env (kept private to Administrators). Edit it now:  notepad .env" -ForegroundColor Yellow
-    Write-Host "Then run this script again to run the self-check and start the service." -ForegroundColor Yellow
+function Lock-EnvFile { icacls $envFile /inheritance:r /grant:r "*S-1-5-32-544:(F)" "*S-1-5-18:(F)" | Out-Null }
+if (-not (Test-Path $envFile)) { Copy-Item (Join-Path $root ".env.example") $envFile }
+Lock-EnvFile
+
+# --- guided setup: validates the keys, finds your Telegram id, writes .env + config\brand.yaml ---------
+# [^\s#] = a real value, not the "KEY=   # comment" placeholder of the template.
+function Test-EnvValue([string]$key) { Select-String -Path $envFile -Pattern "^\s*$key\s*=\s*[^\s#]" -Quiet }
+$configured = (Test-EnvValue "ANTHROPIC_API_KEY") -and (Test-EnvValue "TELEGRAM_BOT_TOKEN") -and (Test-EnvValue "OWNER_TELEGRAM_ID")
+if (-not $SkipSetup -and ($Reconfigure -or -not $configured)) {
+    # A running agent would be reading the bot's messages, which the setup needs to do itself.
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    & $venvPy -m socialagent setup
+    $setupCode = $LASTEXITCODE
+    Lock-EnvFile   # the setup rewrites .env; make sure it is still private afterwards
+    if ($setupCode -ne 0) {
+        Write-Host "Setup did not finish (nothing was posted or published). Re-run this script to try again." -ForegroundColor Yellow
+        exit 1
+    }
+}
+elseif (-not $configured) {
+    Write-Host "Skipped the guided setup (-SkipSetup). Edit .env now (notepad .env), then run this script again." -ForegroundColor Yellow
     exit 0
 }
 
 # --- ffmpeg reminder ------------------------------------------------------------------------------
-if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and -not (Select-String -Path $envFile -Pattern '^\s*FFMPEG_BIN\s*=\s*\S' -Quiet)) {
+if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and -not (Test-EnvValue "FFMPEG_BIN")) {
     Write-Host "ffmpeg was not found on PATH and FFMPEG_BIN is empty in .env - set it to the full path of ffmpeg.exe." -ForegroundColor Yellow
 }
 
 # --- self-check -----------------------------------------------------------------------------------
-& $venvPy -m socialagent selfcheck
+& $venvPy -m socialagent selfcheck --live
 if ($LASTEXITCODE -ne 0) {
     Write-Host "selfcheck reported problems (see above). Fix them, then re-run." -ForegroundColor Red
     exit 1

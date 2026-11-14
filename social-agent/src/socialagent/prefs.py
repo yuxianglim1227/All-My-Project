@@ -10,6 +10,7 @@ from typing import Callable
 
 from .config import BrandProfile
 from .store import Store
+from . import enhance
 from .styles import StyleCatalog
 
 METHODS = ("api", "manual")  # api = the agent publishes via the official API; manual = it sends you a ready-to-post package
@@ -52,6 +53,16 @@ class Prefs:
         if not self.catalog.has_language(key):
             raise ValueError(f"Unknown language {key!r}")
         self._save({**self._load(), "language": key})
+
+    @property
+    def look(self) -> str:
+        key = self._load().get("look") or self.brand.default_look
+        return key if enhance.is_look(key) else "natural"
+
+    def set_look(self, key: str) -> None:
+        if not enhance.is_look(key):
+            raise ValueError(f"Unknown look {key!r}")
+        self._save({**self._load(), "look": key})
 
     # -- publishing method -----------------------------------------------------------
     def method(self, platform: str) -> str:

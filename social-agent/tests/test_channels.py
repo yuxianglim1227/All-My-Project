@@ -617,3 +617,149 @@ async def test_command_menu_is_set_and_never_lists_a_command_without_a_handler(t
     application, _ = build_telegram(app, notifier)
     registered = set().union(*(h.commands for g in application.handlers.values() for h in g if hasattr(h, "commands")))
     assert {c for c, _ in COMMAND_MENU} <= registered
+
+
+# ================================================================ previews in Telegram: relocate, swap in place, albums
+from socialagent.cards import Preview
+
+
+class PreviewBot(CardBot):
+    """CardBot + the media calls; every call is recorded in order."""
+
+    def __init__(self):
+        super().__init__()
+        self.log = []
+        self.fail_media_edit = None
+        self.fail_delete = None
+
+    async def send_message(self, **kw):
+        self.log.append(("send_message", kw["text"]))
+        return await super().send_message(**kw)
+
+    async def edit_message_text(self, **kw):
+        self.log.append(("edit_text", kw["message_id"], kw["text"]))
+        return await super().edit_message_text(**kw)
+
+    async def send_photo(self, **kw):
+        self._n += 1
+        self.log.append(("send_photo", self._n, kw.get("caption")))
+        return SimpleNamespace(message_id=self._n)
+
+    async def send_video(self, **kw):
+        self._n += 1
+        self.log.append(("send_video", self._n, kw.get("caption")))
+        return SimpleNamespace(message_id=self._n)
+
+    async def send_media_group(self, **kw):
+        ids = []
+        for m in kw["media"]:
+            self._n += 1
+            ids.append(self._n)
+        self.log.append(("send_media_group", ids, [m.caption for m in kw["media"]]))
+        return [SimpleNamespace(message_id=i) for i in ids]
+
+    async def edit_message_media(self, **kw):
+        if self.fail_media_edit:
+            raise self.fail_media_edit
+        self.log.append(("edit_media", kw["message_id"], kw["media"].caption))
+
+    async def delete_message(self, **kw):
+        if self.fail_delete:
+            raise self.fail_delete
+        self.log.append(("delete", kw["message_id"]))
+
+    async def send_document(self, **kw):
+        self.log.append(("send_document", kw.get("caption")))
+
+
+def _card(tmp_path, *files, text="body", caption="👀 Final media"):
+    paths = []
+    for name, kind, data in files:
+        p = tmp_path / name
+        p.write_bytes(data)
+        paths.append(Preview(str(p), kind))
+    return Card("draft", "abc123def0", text, [[Button("✅ Approve", "approve")]], previews=paths, preview_caption=caption)
+
+
+async def _present(n, card, handle=None):
+    return await asyncio.to_thread(n.present, card, handle=handle)
+
+
+async def test_first_present_sends_the_preview_then_the_card_below_it_and_removes_the_ack(tmp_path):
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    handle = await _present(n, _card(tmp_path, ("a.jpg", "image", b"1")), handle="55")           # 55 = the "Got it…" message
+    kinds = [e[0] for e in bot.log]
+    assert kinds == ["send_photo", "send_message", "delete"]                                      # preview first, card below, ack removed
+    assert bot.log[0][2] == "👀 Final media" and bot.log[2] == ("delete", 55)
+    assert handle == "102" and n._shown["102"].ids == [101]                                         # the card's handle is the NEW message
+
+
+async def test_unchanged_media_only_edits_the_card_text(tmp_path):
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    card = _card(tmp_path, ("a.jpg", "image", b"1"))
+    handle = await _present(n, card)
+    bot.log.clear()
+    card2 = Card("draft", "abc123def0", "new caption text", card.rows, previews=card.previews, preview_caption=card.preview_caption)
+    assert await _present(n, card2, handle) == handle
+    assert bot.log == [("edit_text", int(handle), "new caption text")]                              # no media traffic for a caption change
+
+
+async def test_a_new_look_swaps_the_media_in_place_without_new_messages(tmp_path):
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    handle = await _present(n, _card(tmp_path, ("a.jpg", "image", b"1")))
+    bot.log.clear()
+    changed = _card(tmp_path, ("b.jpg", "image", b"22"), caption="👀 Final media - Vivid look")
+    assert await _present(n, changed, handle) == handle
+    assert [e[0] for e in bot.log] == ["edit_media", "edit_text"] and bot.log[0][2] == "👀 Final media - Vivid look"
+
+
+async def test_a_different_shape_resends_everything_and_cleans_up(tmp_path):
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    handle = await _present(n, _card(tmp_path, ("a.jpg", "image", b"1")))
+    bot.log.clear()
+    new = await _present(n, _card(tmp_path, ("v.mp4", "video", b"vid")), handle)                 # image -> video: cannot swap in place
+    assert [e[0] for e in bot.log] == ["send_video", "send_message", "delete", "delete"] and new != handle
+    assert handle not in n._shown and new in n._shown
+
+
+async def test_albums_caption_only_the_first_item_and_swap_item_by_item(tmp_path):
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    handle = await _present(n, _card(tmp_path, ("1.jpg", "image", b"1"), ("2.jpg", "image", b"2"), ("3.mp4", "video", b"3")))
+    assert bot.log[0][0] == "send_media_group" and bot.log[0][2] == ["👀 Final media", None, None] and n._shown[handle].ids == bot.log[0][1]
+    bot.log.clear()
+    await _present(n, _card(tmp_path, ("1b.jpg", "image", b"11"), ("2b.jpg", "image", b"22"), ("3b.mp4", "video", b"33")), handle)
+    assert [e[0] for e in bot.log] == ["edit_media"] * 3 + ["edit_text"] and [e[2] for e in bot.log[:3]] == ["👀 Final media", None, None]
+
+
+async def test_failures_fall_back_gracefully(tmp_path):
+    from telegram.error import BadRequest
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    handle = await _present(n, _card(tmp_path, ("a.jpg", "image", b"1")))
+    bot.log.clear()
+    bot.fail_media_edit = BadRequest("message can't be edited")                                     # swap fails: re-send instead
+    new = await _present(n, _card(tmp_path, ("b.jpg", "image", b"22")), handle)
+    assert "send_photo" in [e[0] for e in bot.log] and new != handle
+    bot.fail_delete = BadRequest("message can't be deleted")                                        # a failed delete is ignored
+    assert await _present(n, _card(tmp_path, ("c.mp4", "video", b"3")), new)
+    assert await _present(n, _card(tmp_path, ("d.jpg", "image", b"4"), text="x" * 6000), None)      # long text is truncated, not rejected
+
+
+async def test_send_files_as_document_photo_or_video_and_skips_huge_files(tmp_path):
+    n, bot = TelegramNotifier(42), PreviewBot()
+    n.attach(bot, asyncio.get_running_loop())
+    jpg, mp4, big = tmp_path / "a.jpg", tmp_path / "b.mp4", tmp_path / "big.mp4"
+    jpg.write_bytes(b"1"); mp4.write_bytes(b"2")
+    with open(big, "wb") as fh:
+        fh.truncate(50 * 1024 * 1024)                                                               # sparse: instant
+    await asyncio.to_thread(n.send_files, [str(jpg)], "doc")
+    await asyncio.to_thread(n.send_files, [str(jpg), str(mp4)], "inline", as_photo=True)
+    await asyncio.to_thread(n.send_files, [str(big)], "huge")
+    await asyncio.sleep(0.2)
+    assert [e[0] for e in bot.log] == ["send_document", "send_photo", "send_video", "send_message"]
+    assert "File too large" in bot.log[-1][1]

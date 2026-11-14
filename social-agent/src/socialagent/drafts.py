@@ -16,15 +16,16 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import feed
+from . import enhance, feed
 from . import media as media_mod
 from .brain import PlanContext, PlanError, Understander, Writer, eligible_targets
-from .cards import Button, Card
+from .cards import Button, Card, Preview
 from .llm import LLMError
 from .media import MediaError
 from .models import APPROVED, DISCARDED, DRAFT_FAILED, DRAFTING, READY, ContentPlan, MediaItem
@@ -58,6 +59,7 @@ class DraftService:
         self._locks_guard = threading.Lock()
         self._confirming: set[str] = set()  # drafts waiting for "Yes, approve anyway"
         self._flash: dict[str, str] = {}  # one-shot notes shown on the next card render
+        self._tone_page: dict[str, int] = {}  # draft id -> which page of tones its card shows ("settings" for /settings)
 
     # ------------------------------------------------------------------ helpers
     def _lock(self, did: str) -> threading.RLock:
@@ -106,8 +108,11 @@ class DraftService:
             return None
         sid = self.store.add_submission(source=source, instruction=instruction, media=[i.to_dict() for i in items])
         hints = self.catalog.parse_hints(instruction)
+        look = hints.look if hints.look and enhance.is_look(hints.look) else self.prefs.look
+        if self.settings.edit_level == "none":
+            look = enhance.ORIGINAL
         did = self.store.add_draft(submission_id=sid, tone=hints.tone or self.prefs.tone, lang=hints.language or self.prefs.language,
-                                   instruction=instruction, state=DRAFTING)
+                                   instruction=instruction, state=DRAFTING, look=look)
         if handle:  # the acknowledgement message the channel already sent: persist it so EVERY later update edits it in place
             self.store.update_draft(did, card_ref=handle)
         d = self.store.get_draft(did)
@@ -121,14 +126,106 @@ class DraftService:
 
     def _run_draft(self, did: str, items: list[MediaItem], instruction: str) -> None:
         try:
-            self._understand_and_write(did, items, instruction)
+            look = self.store.get_draft(did)["look"]
+            with ThreadPoolExecutor(max_workers=1) as pool:  # ffmpeg renders the final media while Claude is thinking
+                render = pool.submit(self._render_safe, did, items, look)
+                try:
+                    self._understand(did, items, instruction)
+                finally:
+                    masters = render.result()
+            self.store.update_draft(did, masters=[m.to_dict() for m in masters])
+            self._write(did)
         except (LLMError, PlanError) as exc:
             self._fail(did, str(exc))
         except Exception as exc:  # never lose the owner's media silently
             log.exception("Unexpected error while drafting %s", did)
             self._fail(did, f"{type(exc).__name__}: {exc}")
 
-    def _understand_and_write(self, did: str, items: list[MediaItem], instruction: str) -> None:
+    # ---- the final media: one set of "masters" per look, previewed exactly as it will be posted
+    def _drafts_root(self, did: str, look: str) -> Path:
+        return self.settings.data_dir / "drafts" / did / look
+
+    def _render(self, did: str, items: list[MediaItem], look: str) -> list[MediaItem]:
+        """Enhanced masters (or the originals) + downsized previews, cached per look so switching back is instant."""
+        root = self._drafts_root(did, look)
+        enhancing = look != enhance.ORIGINAL and self.settings.edit_level != "none"
+        masters: list[MediaItem] = []
+        for i, it in enumerate(items):
+            master = it
+            if enhancing and it.hdr:
+                self._flash.setdefault(did, "HDR video left as shot (enhancing HDR needs tone-mapping).")
+            elif enhancing:
+                dst = root / (f"m{i}.jpg" if it.kind == "image" else f"m{i}.mp4")
+                try:
+                    if not dst.exists():
+                        enhance.enhance(it.path, dst, look)
+                    master = media_mod.probe(dst)
+                except (MediaError, ValueError) as exc:
+                    self._flash[did] = f"Couldn't enhance item {i + 1} ({exc}); using the original."
+            masters.append(master)
+        for i, m in enumerate(masters[:10]):  # Telegram albums hold up to 10
+            pv = root / (f"p{i}.jpg" if m.kind == "image" else f"p{i}.mp4")
+            if not pv.exists():
+                (enhance.preview_image if m.kind == "image" else enhance.preview_video)(m.path, pv)
+        return masters
+
+    def _render_safe(self, did: str, items: list[MediaItem], look: str) -> list[MediaItem]:
+        try:
+            return self._render(did, items, look)
+        except Exception as exc:  # a failed render must not block the draft: fall back to the originals
+            log.exception("Rendering failed for draft %s", did)
+            self._flash[did] = f"Couldn't render the preview ({exc}); using your originals."
+            return items
+
+    def _master_items(self, d: dict[str, Any]) -> list[MediaItem]:
+        return [MediaItem.from_dict(m) for m in d["masters"]] if d.get("masters") else self._items(d)
+
+    def _previews(self, d: dict[str, Any]) -> list[Preview]:
+        root = self._drafts_root(d["id"], d["look"])
+        out = []
+        for i, m in enumerate((d.get("masters") or [])[:10]):
+            f = root / (f"p{i}.jpg" if m["kind"] == "image" else f"p{i}.mp4")
+            if f.exists():
+                out.append(Preview(str(f), m["kind"]))
+        return out
+
+    def set_look(self, did: str, look: str) -> None:
+        with self._lock(did):
+            d = self._editable(did)
+            if not d or d["state"] != READY or not enhance.is_look(look) or self.settings.edit_level == "none":
+                return
+            if look != d["look"]:
+                self._present(d, Card("draft", did, f"✨ Re-rendering with the {enhance.label_of(look)} look…"))
+                try:
+                    masters = self._render(did, self._items(d), look)
+                except Exception as exc:
+                    self._flash[did] = f"Couldn't render that look: {exc}"
+                    self._present(d, self.card(did))
+                    return
+                self.store.update_draft(did, look=look, masters=[m.to_dict() for m in masters])
+            self._present(self.store.get_draft(did), self.card(did))
+
+    def compare(self, did: str) -> None:
+        """Send a Before | After image for the first item (a still frame for videos)."""
+        with self._lock(did):
+            d = self.store.get_draft(did)
+            if not d or not d.get("masters"):
+                return
+            items = self._items(d)
+            master = d["masters"][0]
+            if master["path"] == items[0].path:
+                self._flash[did] = "This draft uses your original: nothing to compare. Pick a look first."
+                self._present(d, self.card(did))
+                return
+            out = self._drafts_root(did, d["look"]) / "compare.jpg"
+            try:
+                enhance.compare_image(items[0].path, master["path"], out)
+            except (MediaError, ValueError) as exc:
+                self.notifier.notify(f"Couldn't build the comparison: {exc}")
+                return
+            self.notifier.send_files([str(out)], f"Before | After - {enhance.label_of(d['look'])} look", as_photo=True)
+
+    def _understand(self, did: str, items: list[MediaItem], instruction: str) -> None:
         brief, notes = self.understander.understand(instruction, items, self._context(self.pipeline.clock()))
         targets: list[dict[str, Any]] = []
         for i, e in enumerate(eligible_targets(items), 1):
@@ -143,7 +240,6 @@ class DraftService:
         self.store.update_draft(did, brief=brief.to_dict(), targets=targets)
         if notes:
             self._flash[did] = " ".join(notes)
-        self._write(did)
 
     def _write(self, did: str, only: list[str] | None = None, change: str = "") -> None:
         """(Re)write captions for the selected targets in the draft's current style. Text only: fast and cheap."""
@@ -286,7 +382,7 @@ class DraftService:
             self._present(d, Card("draft", did, "⏳ Scheduling…"))
             try:
                 created, notes = self.pipeline.schedule_targets(
-                    d["submission_id"], self._items(d), selected, pillar=brief.get("pillar", ""),
+                    d["submission_id"], self._master_items(d), selected, pillar=brief.get("pillar", ""),
                     method_for=self.prefs.method, now_flag=now)
             except (PlanError, MediaError) as exc:
                 self._flash[did] = f"❌ Couldn't schedule: {exc}"
@@ -326,7 +422,9 @@ class DraftService:
         text = self._card_text(d, PREVIEW_CHARS)
         if len(text) > CARD_LIMIT:
             text = self._card_text(d, 140)
-        return Card("draft", did, text, self._card_rows(d))
+        look = d.get("look", enhance.ORIGINAL)
+        return Card("draft", did, text, self._card_rows(d), previews=self._previews(d),
+                    preview_caption=f"👀 Final media - {enhance.label_of(look)}" + (" look" if look != enhance.ORIGINAL else " (as you sent it)"))
 
     def _card_text(self, d: dict[str, Any], preview: int) -> str:
         items = self._items(d)
@@ -337,7 +435,8 @@ class DraftService:
         lines = [f"📝 Draft [{d['id']}] · {kinds.count('image')} photo(s) · {kinds.count('video')} video(s)"]
         if brief.get("summary"):
             lines.append(brief["summary"])
-        lines.append(f"🎭 {tone.emoji} {tone.label}   🌐 {lang.label}")
+        lines.append(f"🎭 {tone.emoji} {tone.label}   🌐 {lang.label}" + (
+            f"   ✨ {enhance.label_of(d['look'])}" if self.settings.edit_level != "none" else ""))
         selected = [t for t in d["targets"] if t["selected"]]
         for t in selected:
             when = self.pipeline.fmt(self.pipeline.suggest_slot(t["platform"], t["kind"], t["when"]), now)
@@ -361,12 +460,34 @@ class DraftService:
         lines.append("\nTip: reply to this message to tell me what to change, or start with = to use your own caption.")
         return "\n".join(lines)
 
+    def _tone_rows(self, selected: str, page_key: str) -> list[list[Button]]:
+        """Tone buttons for the current page (defaults to the page that contains the selected tone) + a ➕ More button."""
+        pages = self.catalog.tone_pages(6)
+        page = self._tone_page.get(page_key)
+        if page is None:
+            page = next((i for i, pg in enumerate(pages) if any(t.key == selected for t in pg)), 0)
+        page %= len(pages)
+        btns = [Button(f"{t.emoji} {t.label}", f"tone:{t.key}", t.key == selected) for t in pages[page]]
+        rows = [btns[:3], btns[3:]] if len(btns) > 3 else [btns]
+        if len(pages) > 1:
+            rows[-1].append(Button(f"➕ More {page + 1}/{len(pages)}", f"tonepage:{(page + 1) % len(pages)}"))
+        return rows
+
+    @staticmethod
+    def _look_buttons(selected: str, prefix: str = "look") -> list[Button]:
+        btns = [Button(f"{lk.emoji} {lk.label}", f"{prefix}:{lk.key}", lk.key == selected) for lk in enhance.LOOKS.values()]
+        return btns + [Button("⛔ None", f"{prefix}:{enhance.ORIGINAL}", selected == enhance.ORIGINAL)]
+
     def _card_rows(self, d: dict[str, Any]) -> list[list[Button]]:
-        tones = [Button(f"{t.emoji} {t.label}", f"tone:{t.key}", t.key == d["tone"]) for t in self.catalog.tones]
-        rows = [tones[i:i + 3] for i in range(0, len(tones), 3)]
+        rows = self._tone_rows(d["tone"], d["id"])
         rows.append([Button(x.label, f"lang:{x.key}", x.key == d["lang"]) for x in self.catalog.languages])
+        if self.settings.edit_level != "none":
+            rows.append(self._look_buttons(d["look"]))
         rows.append([Button(("☑ " if t["selected"] else "☐ ") + t["short"], f"tgt:{t['id']}", t["selected"]) for t in d["targets"]])
-        rows.append([Button("🔄 Rewrite", "rewrite"), Button("✏️ My caption", "mycap"), Button("💬 Change…", "change")])
+        edits = [Button("🔄 Rewrite", "rewrite"), Button("✏️ My caption", "mycap"), Button("💬 Change…", "change")]
+        if self.settings.edit_level != "none" and d["look"] != enhance.ORIGINAL:
+            edits.append(Button("🔍 Compare", "compare"))
+        rows.append(edits)
         flagged = bool((d["brief"] or {}).get("risk_flags"))
         approve = (Button("⚠️ Yes, approve anyway", "approve!") if flagged and d["id"] in self._confirming
                    else Button("✅ Approve", "approve"))
@@ -401,6 +522,15 @@ class DraftService:
             self.set_language(did, arg)
         elif kind == "tgt":
             self.toggle_target(did, arg)
+        elif kind == "look":
+            self.set_look(did, arg)
+        elif action == "compare":
+            self.compare(did)
+        elif kind == "tonepage":
+            self._tone_page[did] = int(arg or 0)
+            d = self.store.get_draft(did)
+            if d and d["state"] in (READY, DRAFT_FAILED):
+                self._present(d, self.card(did))
         elif action == "rewrite":
             self.rewrite(did)
         elif action == "approve":
@@ -426,16 +556,17 @@ class DraftService:
         tone, lang = self.prefs.tone, self.prefs.language
         lines = ["⚙️ Settings", "Defaults for every new draft (you can still change each draft with its buttons).",
                  f"🎭 Tone: {self.catalog.tone(tone).label}   🌐 Language: {self.catalog.language(lang).label}"]
-        rows = []
-        tones = [Button(f"{t.emoji} {t.label}", f"tone:{t.key}", t.key == tone) for t in self.catalog.tones]
-        rows += [tones[i:i + 3] for i in range(0, len(tones), 3)]
+        rows = self._tone_rows(tone, "settings")
         rows.append([Button(x.label, f"lang:{x.key}", x.key == lang) for x in self.catalog.languages])
+        if self.settings.edit_level != "none":
+            rows.append(self._look_buttons(self.prefs.look, "look"))
         for plat in PLATFORMS:
             m = self.prefs.method(plat)
             lines.append(f"{PLATFORM_ICON[plat]} {plat.title()}: {'auto-post via API' if m == 'api' else 'you post it from the app (I send a package)'}")
             rows.append([Button(f"{PLATFORM_ICON[plat]} {plat.title()}: " + ("API" if x == "api" else "Manual"), f"method:{plat}:{x}", m == x)
                          for x in METHODS])
-        lines.append(f"✂️ Editing: {self.settings.edit_level} (Phase 1 = originals; formats fixed only where a platform requires it)")
+        lines.append(f"✂️ Editing level: {self.settings.edit_level}" + (
+            f" · default look: {enhance.label_of(self.prefs.look)}" if self.settings.edit_level != "none" else " (originals only)"))
         return Card("settings", "-", "\n".join(lines), rows)
 
     def settings_action(self, action: str) -> str:
@@ -445,6 +576,11 @@ class DraftService:
                 self.prefs.set_tone(arg)
             elif kind == "lang":
                 self.prefs.set_language(arg)
+            elif kind == "look":
+                self.prefs.set_look(arg)
+            elif kind == "tonepage":
+                self._tone_page["settings"] = int(arg or 0)
+                return ""
             elif kind == "method":
                 plat, _, method = arg.partition(":")
                 self.prefs.set_method(plat, method)

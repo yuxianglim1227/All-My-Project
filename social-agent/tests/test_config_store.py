@@ -12,7 +12,7 @@ from socialagent.timeutil import iso, parse_iso, parse_when, tz
 def test_settings_defaults_are_safe():
     s = Settings.from_env({})
     assert s.dry_run is True            # never posts until explicitly enabled
-    assert s.edit_level == "none"                    # Phase 1: originals, no creative editing
+    assert s.edit_level == "enhance"                # light polish by default; originals are one tap away
     assert s.tiktok_privacy == "SELF_ONLY"
     assert s.owner_telegram_id is None
 
@@ -176,7 +176,7 @@ def test_env_example_matches_the_settings_the_code_actually_reads():
     assert unread == [], f".env.example documents variables the code never reads: {unread}"
 
     s = Settings.from_env(env)
-    assert s.dry_run is True and s.edit_level == "none"             # the shipped example is safe by default
+    assert s.dry_run is True and s.edit_level == "enhance"          # the shipped example is safe by default
     assert s.tiktok_privacy == "SELF_ONLY" and s.tiktok_mode == "direct"
     assert s.claude_model == "claude-opus-5-5" and s.owner_telegram_id is None
     assert s.undo_window_seconds == 120 and s.collect_window_seconds == 3 and s.max_reel_seconds == 90

@@ -40,6 +40,7 @@ class MediaItem:
     acodec: str = ""
     container: str = ""
     size: int = 0
+    hdr: bool = False  # HDR transfer (HLG / PQ): enhancement is skipped, it would need tone-mapping
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -51,6 +52,7 @@ class MediaItem:
             height=int(d.get("height", 0)), duration=float(d.get("duration", 0.0)),
             has_audio=bool(d.get("has_audio", False)), vcodec=str(d.get("vcodec", "")),
             acodec=str(d.get("acodec", "")), container=str(d.get("container", "")), size=int(d.get("size", 0)),
+            hdr=bool(d.get("hdr", False)),
         )
 
 

@@ -12,9 +12,11 @@ voice: >
 # Defaults for every new draft. You can change them per draft with the buttons, or for good with /settings.
 #   tone:     descriptive | funny | aesthetic | storytelling | informative | hype   (or one you define below)
 #   language: en | zh (简体中文) | zh-hant (繁體中文) | bi (English + 中文)
+#   look:     natural | vivid | bright | moody | original
 defaults:
   tone: descriptive
   language: en
+  look: natural      # photo/video polish: natural | vivid | bright | moody | original (no edit)
 
 # Optional: add your own tones (they appear as buttons) or override a built-in one by reusing its key.
 # tones:

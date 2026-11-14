@@ -45,7 +45,7 @@ class PrintNotifier:
             self._n += 1
         return handle or f"cli{self._n}"
 
-    def send_files(self, paths: list[str], caption: str = "") -> None:
+    def send_files(self, paths: list[str], caption: str = "", *, as_photo: bool = False) -> None:
         print(f"(files to send: {', '.join(paths)}) {caption}")
 
 
@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--env-file", default=".env", help="path to the .env file (default ./.env)")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("setup", help="guided first-time setup: checks your Claude key + Telegram bot, finds your Telegram id, writes .env and brand.yaml")
     sub.add_parser("run", help="start Telegram bot + HTTP server + scheduler")
     s = sub.add_parser("submit", help="create a DRAFT from files (like sending them to the bot); nothing posts until approved")
     s.add_argument("files", nargs="+")
@@ -62,7 +63,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("drafts", help="list open drafts")
     d = sub.add_parser("draft", help="show or change a draft: tone, language, targets, captions, approve, discard")
     d.add_argument("draft_id")
-    d.add_argument("--tone"); d.add_argument("--lang")
+    d.add_argument("--tone"); d.add_argument("--lang"); d.add_argument("--look", help="natural | vivid | bright | moody | original")
     d.add_argument("--toggle", action="append", default=[], metavar="TARGET_ID", help="turn a target on/off (t1, t2, ...)")
     d.add_argument("--change", help="rewrite with this instruction")
     d.add_argument("--caption", help="use this exact caption")
@@ -85,7 +86,8 @@ def _parser() -> argparse.ArgumentParser:
     h.add_argument("--done", nargs="?", const="", default=None, metavar="NAME", help="mark added (optionally one collection)")
     sub.add_parser("review", help="weekly feed review")
     c = sub.add_parser("selfcheck", help="verify setup with read-only checks")
-    c.add_argument("--claude", action="store_true", help="also make one tiny live Claude call")
+    c.add_argument("--live", "--claude", dest="claude", action="store_true",
+                   help="also make live calls: one tiny Claude request and Telegram getMe (--claude is the old name)")
     a = sub.add_parser("auth", help="credential helpers")
     asub = a.add_subparsers(dest="auth_cmd", required=True)
     u = asub.add_parser("tiktok-url", help="print the TikTok authorisation URL"); u.add_argument("--redirect", required=True)
@@ -115,6 +117,10 @@ def _setup_file_logging(settings: Settings) -> Path:
 
 def main(argv: Sequence[str] | None = None, *, llm: LLM | None = None, http: httpx.Client | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.cmd == "setup":  # reads/writes the .env itself; must not load it into the process first
+        _setup_logging(args.verbose)
+        from .setup import main_setup
+        return main_setup(args.env_file)
     load_dotenv(args.env_file)
     _setup_logging(args.verbose)
     try:
@@ -186,7 +192,7 @@ def _dispatch(args: argparse.Namespace, app: App, settings: Settings, http: http
     elif args.cmd == "review":
         print(pipe.weekly_review())
     elif args.cmd == "selfcheck":
-        return _selfcheck(app, settings, args.claude)
+        return _selfcheck(app, settings, args.claude, http)
     elif args.cmd == "auth":
         return _auth(args, app, settings, http)
     return 0
@@ -201,6 +207,8 @@ def _draft_command(args: argparse.Namespace, app: App) -> int:
     quiet = getattr(notifier, "quiet", None) is not None
     if quiet:
         notifier.quiet = True
+    if args.look:
+        d.set_look(args.draft_id, args.look)
     if args.tone:
         d.set_tone(args.draft_id, args.tone)
     if args.lang:
@@ -222,7 +230,7 @@ def _draft_command(args: argparse.Namespace, app: App) -> int:
     return 0
 
 
-def _selfcheck(app: App, settings: Settings, live_claude: bool) -> int:
+def _selfcheck(app: App, settings: Settings, live: bool, http: httpx.Client | None = None) -> int:
     lines: list[str] = []
     bad = False
 
@@ -253,13 +261,20 @@ def _selfcheck(app: App, settings: Settings, live_claude: bool) -> int:
     if app.pipeline.manual is not None:
         for line in app.pipeline.manual.selfcheck():
             add(True, line)
-    add(None if settings.edit_level == "none" else True,
-        f"EDIT_LEVEL={settings.edit_level}" + (" (Phase 1: originals only, no creative editing)" if settings.edit_level == "none" else ""))
-    if live_claude:
+    notes = {"none": " (your originals, untouched)", "enhance": " (light polish: exposure, contrast, shadows/highlights, colour; pick a look per draft)",
+             "fit": " (+ reframes to 9:16 / 4:5)", "creative": " (+ hook text)"}
+    add(True, f"EDIT_LEVEL={settings.edit_level}{notes[settings.edit_level]}")
+    if live:
         try:
             add(True, f"Claude replied: {app.llm.text(system='Reply with the single word OK.', content='ping', max_tokens=50)[:40]!r}")
         except LLMError as exc:
             add(False, f"Claude call failed: {exc}")
+        if settings.telegram_token:
+            from .setup import SetupError, telegram_get_me
+            try:
+                add(True, f"Telegram bot reachable: @{telegram_get_me(http or httpx.Client(timeout=30), settings.telegram_token).get('username', '?')}")
+            except SetupError as exc:
+                add(False, f"Telegram: {exc}")
     print("\n".join(lines))
     return 1 if bad else 0
 

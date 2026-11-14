@@ -119,8 +119,8 @@ class Settings:
     tiktok_mode: str = "direct"
     tiktok_privacy: str = "SELF_ONLY"
 
-    # editing: none = originals (format fixes only), fit = + reframe to 9:16 / 4:5, creative = + trims & hook text
-    edit_level: str = "none"
+    # editing: none = originals | enhance = + light/colour polish (default) | fit = + reframe to 9:16 / 4:5 | creative = + hook text
+    edit_level: str = "enhance"
     ffmpeg_bin: str = ""
     ffprobe_bin: str = ""
     max_reel_seconds: int = 90
@@ -134,9 +134,9 @@ class Settings:
         mode = _str(e.get("TIKTOK_MODE"), "direct").lower()
         if mode not in {"direct", "inbox"}:
             raise ValueError("TIKTOK_MODE must be 'direct' or 'inbox'")
-        edit_level = _str(e.get("EDIT_LEVEL"), "none").lower()
-        if edit_level not in {"none", "fit", "creative"}:
-            raise ValueError("EDIT_LEVEL must be none, fit or creative")
+        edit_level = _str(e.get("EDIT_LEVEL"), "enhance").lower()
+        if edit_level not in {"none", "enhance", "fit", "creative"}:
+            raise ValueError("EDIT_LEVEL must be none, enhance, fit or creative")
         effort = _str(e.get("CLAUDE_EFFORT"), "medium").lower()
         if effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError("CLAUDE_EFFORT must be low|medium|high|xhigh|max")
@@ -225,6 +225,7 @@ class BrandProfile:
     voice: str = ""
     default_tone: str = "descriptive"
     default_language: str = "en"
+    default_look: str = "natural"
     custom_tones: list[dict[str, Any]] = field(default_factory=list)
     pillars: list[Pillar] = field(default_factory=list)
     dos: list[str] = field(default_factory=list)
@@ -249,6 +250,7 @@ class BrandProfile:
             voice=" ".join(str(d.get("voice") or "").split()),
             default_tone=str((d.get("defaults") or {}).get("tone") or "descriptive"),
             default_language=str((d.get("defaults") or {}).get("language") or "en"),
+            default_look=str((d.get("defaults") or {}).get("look") or "natural"),
             custom_tones=[dict(t) for t in (d.get("tones") or []) if isinstance(t, Mapping)],
             pillars=[Pillar(str(p.get("name")), float(p.get("weight") or 0), str(p.get("description") or ""))
                      for p in (d.get("pillars") or []) if p.get("name")],
@@ -294,7 +296,7 @@ class BrandProfile:
             f"Audience: {self.audience}",
             f"Region: {self.region}",
             f"Voice: {self.voice}",
-            f"Default caption style: tone={self.default_tone}, language={self.default_language} (the owner can change it per post)",
+            f"Default caption style: tone={self.default_tone}, language={self.default_language}; photo look={self.default_look} (the owner can change each per post)",
             "Content pillars (target mix): "
             + "; ".join(f"{p.name} {p.weight:g}% ({p.description})" for p in self.pillars),
             "Do: " + " | ".join(self.dos),

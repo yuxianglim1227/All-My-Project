@@ -22,6 +22,11 @@ CAT = StyleCatalog.from_brand()
     ("hype it up", "hype", None),
     ("", None, None),
     ("post this tonight", None, None),
+    ("sassy", "sassy", None), ("make it wholesome", "wholesome", None), ("luxe vibes", "luxury", None),
+    ("nostalgic, throwback", "nostalgic", None), ("gen z please", "genz", None), ("励志 中文", "inspirational", "zh"),
+    ("a bit mysterious", "mysterious", None), ("corporate and polished", "professional", None),
+    ("dry humour", "deadpan", None),                          # 'dry humour' is more specific than 'humour' (funny)
+    ("mouthwatering", "foodie", None),
 ])
 def test_parse_hints(text, tone, lang):
     h = CAT.parse_hints(text)
@@ -35,6 +40,9 @@ def test_parse_hints(text, tone, lang):
     "hyperlink in bio",           # 'hype' inside 'hyperlink'
     "englishman at the bar",
     "tips for next time",         # too generic to switch tone
+    "my professional photographer friend",   # 'professional' alone is a description, not a tone
+    "a bright sunny day",
+    "retro diner",
 ])
 def test_parse_hints_has_no_false_positives(text):
     h = CAT.parse_hints(text)
@@ -50,14 +58,29 @@ def test_catalog_defaults_and_fallbacks():
 
 def test_custom_tones_add_and_override_and_skip_invalid():
     cat = StyleCatalog.from_brand([
-        {"key": "Sassy", "label": "Sassy", "emoji": "💅", "guidance": "Confident and teasing."},
+        {"key": "Zesty", "label": "Zesty", "emoji": "🍋", "guidance": "Bright, tangy and quick."},
         {"key": "funny", "guidance": "Dry deadpan humour only."},            # overrides the built-in
         {"key": "broken"},                                                      # no guidance: ignored
         {"guidance": "no key"},
     ])
-    assert cat.has_tone("sassy") and not cat.has_tone("broken") and len(cat.tones) == len(DEFAULT_TONES) + 1
+    assert cat.has_tone("zesty") and not cat.has_tone("broken") and len(cat.tones) == len(DEFAULT_TONES) + 1
     assert cat.tone("funny").guidance == "Dry deadpan humour only." and cat.tone("funny").label == "Funny"
-    assert cat.tone("sassy").emoji == "💅"
+    assert cat.tone("zesty").emoji == "🍋"
     assert cat.parse_hints("funny").tone == "funny"
     with pytest.raises(ValueError):
         StyleCatalog([], DEFAULT_LANGUAGES)
+
+
+@pytest.mark.parametrize("text,look", [
+    ("moody", "moody"), ("make it cinematic", "moody"), ("vivid colours", "vivid"), ("bright and airy", "bright"),
+    ("no edit please", "original"), ("unedited", "original"), ("不修图", "original"), ("natural look", "natural"),
+    ("a bright sunny day", None), ("post tonight", None),
+])
+def test_look_hints(text, look):
+    assert CAT.parse_hints(text).look == look
+
+
+def test_sixteen_tones_in_pages_of_six():
+    assert len(CAT.tones) == 16 and len({t.key for t in CAT.tones}) == 16
+    assert [len(p) for p in CAT.tone_pages(6)] == [6, 6, 4]
+    assert all(t.guidance and t.emoji and t.label and len(t.label) <= 9 for t in CAT.tones)

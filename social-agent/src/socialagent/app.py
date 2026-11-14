@@ -81,7 +81,7 @@ def build_app(settings: Settings, notifier: Notifier, *, llm: LLM | None = None,
     pubs = publishers if publishers is not None else make_publishers(settings, tokens, http)
     draft_maker = capcut.draft_maker_for(settings.jianying_drafts_dir) if settings.jianying_drafts_dir else None
     pipeline = Pipeline(settings=settings, brand=brand, store=store, trends=trends, publishers=pubs, host=host,
-                        notifier=notifier, manual=ManualPublisher(notifier), draft_maker=draft_maker)
+                        notifier=notifier, manual=ManualPublisher(notifier, host), draft_maker=draft_maker)
     catalog = StyleCatalog.from_brand(brand.custom_tones)
 
     def has_api_credentials(platform: str) -> bool:

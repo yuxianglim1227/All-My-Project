@@ -353,13 +353,15 @@ def test_custom_tones_from_brand_yaml_appear_after_a_hot_reload(media_dir, tmp_p
     import time
     rig = make_rig(tmp_path)
     f = rig.settings.brand_file
-    f.write_text(f.read_text() + '\ntones:\n  - { key: sassy, label: "Sassy", emoji: "💅", guidance: "Confident and teasing." }\n')
+    f.write_text(f.read_text() + '\ntones:\n  - { key: zesty, label: "Zesty", emoji: "🍋", guidance: "Bright and tangy." }\n')
     os.utime(f, (time.time() + 5, time.time() + 5))
-    did = rig.submit([media_dir / "photo.jpg"], "sassy", approve=False)         # 'sassy' is not a built-in hint ...
+    did = rig.submit([media_dir / "photo.jpg"], "zesty", approve=False)         # 'zesty' is not a built-in hint ...
     assert rig.store.get_draft(did)["tone"] == "descriptive"
-    assert button(rig.notifier.last_card, "tone:sassy") is not None            # ... but the button exists
-    rig.drafts.handle_action(did, "tone:sassy")
-    assert "Tone: Sassy - Confident and teasing." in rig.llm.write_calls[-1]
+    assert button(rig.notifier.last_card, "tone:zesty") is None                # (custom tones sit after the built-in pages)
+    rig.drafts.handle_action(did, "tonepage:2")
+    assert button(rig.notifier.last_card, "tone:zesty") is not None            # ... but the button exists
+    rig.drafts.handle_action(did, "tone:zesty")
+    assert "Tone: Zesty - Bright and tangy." in rig.llm.write_calls[-1]
 
 
 def test_rapid_taps_are_serialised_per_draft(media_dir, tmp_path):
@@ -404,3 +406,222 @@ def test_a_channel_supplied_handle_is_persisted_so_every_update_edits_that_messa
     rig.drafts.handle_action(did, "lang:zh")
     rig.drafts.approve(did)
     assert {h for _, h in rig.notifier.cards} == {"777"} and len(rig.notifier.cards) >= 5
+
+
+def test_more_tones_are_reachable_by_paging_and_the_selected_tone_page_is_shown(media_dir, tmp_path):
+    rig = make_rig(tmp_path)
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    card = rig.notifier.last_card
+    assert button(card, "tone:funny") is not None and button(card, "tone:sassy") is None and button(card, "tonepage:1").label == "➕ More 1/3"
+    n = len(rig.llm.write_calls)
+    rig.drafts.handle_action(did, "tonepage:1")                               # paging is free: no AI call
+    card = rig.notifier.last_card
+    assert button(card, "tone:sassy") is not None and button(card, "tone:funny") is None and button(card, "tonepage:2").label == "➕ More 2/3"
+    assert len(rig.llm.write_calls) == n
+    rig.drafts.handle_action(did, "tone:sassy")
+    assert rig.store.get_draft(did)["tone"] == "sassy" and "Tone: Sassy" in rig.llm.write_calls[-1]
+    assert button(rig.notifier.last_card, "tone:sassy").selected
+    rig.drafts.handle_action(did, "tonepage:2"); rig.drafts.handle_action(did, "tonepage:0")
+    assert button(rig.notifier.last_card, "tone:funny") is not None           # wraps around
+    # a draft that starts on a tone from page 3 opens on that page
+    did2 = rig.submit([media_dir / "photo.jpg"], "deadpan", approve=False)
+    assert button(rig.notifier.last_card, "tone:deadpan").selected and button(rig.notifier.last_card, "tonepage:0") is not None
+    assert rig.store.get_draft(did2)["tone"] == "deadpan"
+
+
+def test_settings_card_pages_through_tones_too(media_dir, tmp_path):
+    rig = make_rig(tmp_path)
+    assert button(rig.drafts.settings_card(), "tone:funny") is not None
+    assert rig.drafts.settings_action("tonepage:1") == ""
+    page2 = rig.drafts.settings_card()
+    assert button(page2, "tone:sassy") is not None and button(page2, "tone:funny") is None
+    assert rig.drafts.settings_action("tone:sassy") == "Saved" and rig.prefs.tone == "sassy"
+
+
+# ================================================================ Phase 2a: edited masters + previews ("what you see is what posts")
+ENH = {"EDIT_LEVEL": "enhance"}
+
+
+def test_masters_and_previews_are_rendered_while_the_draft_is_built(media_dir, tmp_path):
+    from pathlib import Path
+    rig = make_rig(tmp_path, env=ENH)
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    d = rig.store.get_draft(did)
+    master = d["masters"][0]["path"]
+    assert d["look"] == "natural" and master != str(media_dir / "photo.jpg") and master.startswith(str(rig.settings.data_dir / "drafts"))
+    assert media.probe(master).vcodec == "mjpeg" and open(master, "rb").read() != (media_dir / "photo.jpg").read_bytes()
+    card = rig.notifier.last_card
+    assert len(card.previews) == 1 and card.previews[0].kind == "image" and Path(card.previews[0].path).exists()
+    assert media.probe(card.previews[0].path).width <= 1280
+    assert "✨ Natural" in card.text and card.preview_caption == "👀 Final media - Natural look"
+    assert button(card, "look:vivid") is not None and button(card, "look:natural").selected and button(card, "look:original") is not None
+    assert button(card, "compare") is not None
+
+
+def test_approve_publishes_exactly_the_file_you_previewed(media_dir, tmp_path):
+    rig = make_rig(tmp_path, env=ENH)
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    master = rig.store.get_draft(did)["masters"][0]["path"]
+    rig.drafts.approve(did)
+    sent = posts(rig)[0]["media"][0]["path"]
+    assert open(sent, "rb").read() == open(master, "rb").read()                 # the previewed master, byte for byte
+    assert open(sent, "rb").read() != (media_dir / "photo.jpg").read_bytes()    # ... and it is the edited version, not the original
+
+
+def test_switching_look_rerenders_swaps_the_preview_and_never_calls_the_ai(media_dir, tmp_path):
+    import os
+    rig = make_rig(tmp_path, env=ENH)
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    natural = rig.store.get_draft(did)["masters"][0]["path"]
+    key1 = rig.notifier.last_card.previews[0].key
+    writes, vision = len(rig.llm.write_calls), len(calls(rig, UNDERSTAND_SCHEMA))
+
+    rig.drafts.handle_action(did, "look:moody")
+    d = rig.store.get_draft(did)
+    assert d["look"] == "moody" and d["masters"][0]["path"] != natural and rig.notifier.last_card.previews[0].key != key1
+    assert "Re-rendering" in rig.notifier.cards[-2][0].text                       # a status card while it renders
+    assert len(rig.llm.write_calls) == writes and len(calls(rig, UNDERSTAND_SCHEMA)) == vision
+
+    mtime = os.stat(natural).st_mtime_ns
+    rig.drafts.handle_action(did, "look:natural")                                 # back to a look rendered before: cached, instant
+    assert os.stat(natural).st_mtime_ns == mtime and rig.store.get_draft(did)["masters"][0]["path"] == natural
+
+    rig.drafts.handle_action(did, "look:original")
+    d = rig.store.get_draft(did)
+    assert d["masters"][0]["path"] == str(media_dir / "photo.jpg")                # original = untouched file
+    card = rig.notifier.last_card
+    assert button(card, "compare") is None and card.preview_caption.endswith("(as you sent it)") and button(card, "look:original").selected
+    n = len(rig.notifier.cards)
+    rig.drafts.handle_action(did, "look:original")                                 # same look again: nothing to render
+    assert len(rig.notifier.cards) == n + 1 and "Re-rendering" not in rig.notifier.last_card.text
+    rig.drafts.handle_action(did, "look:sepia")                                    # unknown look ignored
+    assert rig.store.get_draft(did)["look"] == "original"
+
+
+def test_look_hints_and_defaults(media_dir, tmp_path):
+    rig = make_rig(tmp_path, env=ENH)
+    assert rig.store.get_draft(rig.submit([media_dir / "photo.jpg"], "moody please", approve=False))["look"] == "moody"
+    rig.prefs.set_look("vivid")
+    assert rig.store.get_draft(rig.submit([media_dir / "photo.jpg"], "", approve=False))["look"] == "vivid"
+    d = rig.store.get_draft(rig.submit([media_dir / "photo.jpg"], "no edit, funny", approve=False))
+    assert d["look"] == "original" and d["tone"] == "funny" and d["masters"][0]["path"] == str(media_dir / "photo.jpg")
+    with pytest.raises(ValueError):
+        rig.prefs.set_look("sepia")
+
+
+def test_edit_level_none_means_originals_no_look_buttons_but_still_a_preview(media_dir, tmp_path):
+    rig = make_rig(tmp_path)                                                       # the test rig defaults to EDIT_LEVEL=none
+    did = rig.submit([media_dir / "photo.jpg"], "moody", approve=False)
+    d, card = rig.store.get_draft(did), rig.notifier.last_card
+    assert d["look"] == "original" and d["masters"][0]["path"] == str(media_dir / "photo.jpg")
+    assert len(card.previews) == 1 and not any(a.startswith("look:") for a in actions(card)) and "✨" not in card.text
+    rig.drafts.set_look(did, "vivid")
+    assert rig.store.get_draft(did)["look"] == "original"
+
+
+def test_video_master_is_h264_previewed_small_and_published_as_previewed(media_dir, tmp_path):
+    rig = make_rig(tmp_path, env=ENH)
+    set_plan(rig.llm, one_post("instagram", "reel"))
+    did = rig.submit([media_dir / "landscape.mp4"], approve=False)
+    master = rig.store.get_draft(did)["masters"][0]
+    m = media.probe(master["path"])
+    assert (m.vcodec, m.acodec, m.width, m.height) == ("h264", "aac", 1280, 720)
+    pv = rig.notifier.last_card.previews[0]
+    p = media.probe(pv.path)
+    assert pv.kind == "video" and p.height <= 720 and p.size < 3_000_000
+    rig.drafts.approve(did)
+    assert open(posts(rig)[0]["media"][0]["path"], "rb").read() == open(master["path"], "rb").read()
+
+
+def test_hdr_clips_are_left_as_shot(media_dir, tmp_path, monkeypatch):
+    import dataclasses
+    orig = media.probe
+    monkeypatch.setattr(media, "probe", lambda p: dataclasses.replace(orig(p), hdr=True) if str(p).endswith("landscape.mp4") else orig(p))
+    rig = make_rig(tmp_path, env=ENH)
+    set_plan(rig.llm, one_post("instagram", "reel"))
+    did = rig.submit([media_dir / "landscape.mp4"], approve=False)
+    assert rig.store.get_draft(did)["masters"][0]["path"] == str(media_dir / "landscape.mp4")
+    assert "HDR video left as shot" in rig.notifier.last_card.text
+
+
+def test_an_enhancement_failure_falls_back_to_the_original_with_a_note(media_dir, tmp_path, monkeypatch):
+    from socialagent import enhance
+    from socialagent.media import MediaError
+    monkeypatch.setattr(enhance, "enhance", lambda *a, **k: (_ for _ in ()).throw(MediaError("ffmpeg exploded")))
+    rig = make_rig(tmp_path, env=ENH)
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    assert rig.store.get_draft(did)["state"] == "ready" and rig.store.get_draft(did)["masters"][0]["path"] == str(media_dir / "photo.jpg")
+    assert "Couldn't enhance item 1" in rig.notifier.last_card.text and "ffmpeg exploded" in rig.notifier.last_card.text
+
+
+def test_a_render_crash_never_blocks_the_draft(media_dir, tmp_path, monkeypatch):
+    rig = make_rig(tmp_path, env=ENH)
+    monkeypatch.setattr(rig.drafts, "_render", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    card = rig.notifier.last_card
+    assert rig.store.get_draft(did)["state"] == "ready" and card.previews == [] and "Couldn't render the preview" in card.text
+    rig.drafts.approve(did)
+    assert open(posts(rig)[0]["media"][0]["path"], "rb").read() == (media_dir / "photo.jpg").read_bytes()    # posts the original
+
+
+def test_compare_sends_a_before_after_photo(media_dir, tmp_path):
+    rig = make_rig(tmp_path, env=ENH)
+    did = rig.submit([media_dir / "photo.jpg"], approve=False)
+    rig.drafts.handle_action(did, "compare")
+    (paths, caption, as_photo), = rig.notifier.files
+    assert as_photo is True and "Before | After" in caption and "Natural" in caption
+    p = media.probe(paths[0])
+    assert (p.kind, p.width, p.height) == ("image", 1440, 720)                        # two 720x720 halves, side by side
+    rig.drafts.handle_action(did, "look:original")
+    rig.drafts.compare(did)
+    assert len(rig.notifier.files) == 1 and "nothing to compare" in rig.notifier.last_card.text
+
+
+def test_manual_handoff_sends_the_edited_file_and_a_link_when_it_is_too_big(media_dir, tmp_path, monkeypatch):
+    from socialagent.publishers import ManualPublisher
+    rig = make_rig(tmp_path, env=ENH)
+    rig.prefs.set_method("instagram", "manual")
+    did = rig.submit([media_dir / "photo.jpg"], now=True)
+    master = rig.store.get_draft(did)["masters"][0]["path"]
+    rig.pipeline.tick(T0 + timedelta(minutes=3))
+    assert rig.notifier.files == [([master], "Edited media - save it, then post", False)]               # sent as a document: full quality
+    assert any("exact version you previewed" in t for t in rig.notifier.texts)
+
+    rig2 = make_rig(tmp_path / "big", env=ENH)
+    rig2.prefs.set_method("instagram", "manual")
+    monkeypatch.setattr(ManualPublisher, "MAX_SEND_BYTES", 1)
+    rig2.submit([media_dir / "photo.jpg"], now=True)
+    rig2.pipeline.tick(T0 + timedelta(minutes=3))
+    assert rig2.notifier.files == [] and any("too big to send here" in t and "https://agent.example/m/" in t for t in rig2.notifier.texts)
+
+    rig3 = make_rig(tmp_path / "orig")                                                                   # EDIT_LEVEL=none: the original is already on the phone
+    rig3.prefs.set_method("instagram", "manual")
+    rig3.submit([media_dir / "photo.jpg"], now=True)
+    rig3.pipeline.tick(T0 + timedelta(minutes=3))
+    assert rig3.notifier.files == [] and any("original you sent me" in t for t in rig3.notifier.texts)
+
+
+def test_settings_offer_a_default_look_only_when_editing_is_on(media_dir, tmp_path):
+    rig = make_rig(tmp_path, env=ENH)
+    card = rig.drafts.settings_card()
+    assert button(card, "look:vivid") is not None and "default look: Natural" in card.text
+    assert rig.drafts.settings_action("look:bright") == "Saved" and rig.prefs.look == "bright"
+    assert rig.drafts.settings_action("look:sepia").startswith("Unknown look")
+    assert button(make_rig(tmp_path / "n").drafts.settings_card(), "look:vivid") is None
+
+
+def test_an_old_database_gains_the_new_draft_columns(tmp_path):
+    import sqlite3
+    from socialagent.store import Store
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.executescript("""CREATE TABLE drafts (id TEXT PRIMARY KEY, submission_id TEXT NOT NULL, state TEXT NOT NULL, tone TEXT NOT NULL,
+        lang TEXT NOT NULL, instruction TEXT NOT NULL, brief_json TEXT, targets_json TEXT NOT NULL DEFAULT '[]', card_ref TEXT,
+        error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        INSERT INTO drafts(id,submission_id,state,tone,lang,instruction,created_at,updated_at) VALUES('abc123def0','s','ready','funny','en','','t','t');""")
+    con.commit(); con.close()
+    store = Store(db)
+    d = store.get_draft("abc123def0")
+    assert d["look"] == "natural" and d["masters"] is None                           # defaults for the old row
+    store.update_draft("abc123def0", look="moody", masters=[{"path": "x"}])
+    assert store.get_draft("abc123def0")["look"] == "moody" and Store(db).get_draft("abc123def0")["masters"] == [{"path": "x"}]

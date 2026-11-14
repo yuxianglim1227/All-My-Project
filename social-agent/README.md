@@ -1,18 +1,22 @@
 # Social Agent: your Instagram + TikTok manager
 
-Share a photo or video from your phone to a private Telegram bot. The agent looks at it, writes a caption in the
-**tone** (funny, just-describe, aesthetic…) and **language** (English / 中文 / both) you choose, and shows you a **draft
-card**. You tap to tweak, then **Approve**. It posts through the official APIs, or hands you a ready-to-post
-package. It also researches trends, keeps your feed balanced and keeps your Highlights organised.
+Share a photo or video from your phone to a private Telegram bot. The agent **polishes it lightly** (exposure,
+contrast, shadows/highlights, colour), **looks at it**, writes a caption in the **tone** (16 to choose from: funny,
+just-describe, aesthetic…) and **language** (English / 中文 / both) you choose, and sends you the **final photo/video with
+a draft card under it**. You tap to tweak, then **Approve**. It posts exactly what you previewed through the official
+APIs, or hands you a ready-to-post package. It also researches trends, keeps your feed balanced and keeps your
+Highlights organised.
 
-**Phase 1 (this version) = drafts.** Nothing is posted until you tap Approve, and your photos/videos are not
-creatively edited (only fixed where a platform would reject them). Editing is Phase 2. The full design, the agent's
-job description and the roadmap are in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+**Phase 1 (this version) = drafts + light polish.** Nothing is posted until you tap Approve, you always see the final
+media first, and the only edit is a global light/colour polish (no face retouching, no cropping, no creative cuts; those
+are Phase 2). The full design, **where the agent lives**, the agent's job description and the roadmap are in
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ```
- phone ─► Telegram bot ─┐      ┌─ Understand (vision, once) ─┐
- (or Shortcut → HTTP) ──┴─► DRAFT CARD ◄─ Write (text, per tone × language) ─┘
-                              │  tap: tone · language · where · rewrite · Approve
+ phone ─► Telegram bot ─┐      ┌─ polish media (ffmpeg) ────┐          the bot is the front door of ONE program
+ (or Shortcut → HTTP) ──┴─►  PREVIEW + DRAFT CARD ◄─ Understand (vision, once) ┤   running on your server;
+                              │                      Write (text, per tone × language) ┘   Claude is its API "brain"
+                              │  tap: tone · language · look · where · rewrite · Approve
                               ▼
               Instagram API · TikTok API/inbox draft · or a manual package you post in 2 taps
 ```
@@ -29,7 +33,8 @@ Everything defaults to **DRY RUN**: until you switch it off, nothing is ever pos
 | Highlights | ❌ **Instagram has no API to create Highlights.** The agent tags every Story with a collection and sends you a checklist of exactly which Stories to tap into which Highlight (`/highlights`). |
 | Post to TikTok | ⚠️ Official Content Posting API. **Until TikTok audits your app, every direct post is forced private.** Alternative: `TIKTOK_MODE=inbox` uploads a *draft* you publish with one tap. |
 | Trending sounds | ❌ Can't be attached by any API. The agent names trends/formats and tells you when to add a sound in-app (or use TikTok inbox mode). |
-| Edit with CapCut / Jianying | ❌ No public API, and I can't drive your phone apps. **Phase 1 does no creative editing** (the agent only suggests edits). Phase 2 adds ffmpeg editing you approve; an experimental draft export to desktop CapCut/Jianying exists for the same computer only. |
+| Make photos/videos look professional (contrast, light, shadows, highlights, “beautify”) | ✅ **Light polish is on by default** (`EDIT_LEVEL=enhance`): exposure, contrast, shadows, highlights, colour vibrance, a touch of clarity; pick **Natural / Vivid / Bright / Moody** or **None** per draft and see the result first. ⚠️ **It does not retouch faces or skin** (no smoothing, reshaping or filters that change how people look): “beautify” here means light and colour only. It was tuned with measurements on synthetic test images, not by eye on real photos, so judge the preview. HDR (iPhone Dolby Vision) videos are left as shot. |
+| Edit with CapCut / Jianying | ❌ No public API, and I can't drive your phone apps. Creative editing (cuts, text, reframing) is **Phase 2**; an experimental draft export to desktop CapCut/Jianying exists for the same computer only. |
 | Drafts inside Instagram / TikTok | ⚠️ **TikTok: yes** (inbox draft you finish in the app). **Instagram: no draft API exists**, so the draft lives in the bot and, on Approve, is published by API or handed to you as a ready-to-post package. |
 | Research trends | ✅ Claude + web search once a day (incl. Douyin/Xiaohongshu signals that tend to reach TikTok/Reels first). |
 | "Refer to my TikTok / Douyin" | ✅ Via things you give it: links (`/inspo <link>`), **screenshots** (it reads Chinese text and extracts the format/hook), or your TikTok "Download your data" export. It does **not** log into your accounts or scrape: that risks bans and breaks the platforms' terms. |
@@ -53,8 +58,10 @@ Everything defaults to **DRY RUN**: until you switch it off, nothing is ever pos
 | CapCut/Jianying draft calls | ✅ generated a real draft with `pyJianYingDraft` 0.3.1 · ⚠️ not opened in the actual app |
 | Dockerfile / compose | ⚠️ written, not built |
 | Windows behaviour (UTF-8 BOM / UTF-16 / CRLF config files, non-UTF-8 ffmpeg output, `FFMPEG_BIN`, Windows font paths, denied symlinks, no POSIX signals, tokens kept out of logs) | ✅ each simulated and covered by tests on Linux · ❌ **never run on real Windows** |
-| `deploy/windows/install.ps1`, the Caddy and scheduled-task steps, AWS security-group advice | ⚠️ written without a Windows machine: run `selfcheck` and read the script before trusting it |
-| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI | ✅ **325 automated tests** (`python -m pytest -q`) |
+| `deploy/windows/install.ps1` (including the guided-setup step), the Caddy and scheduled-task steps, AWS security-group advice | ⚠️ written without a Windows machine: read the script before trusting it; `selfcheck --live` verifies the result |
+| `socialagent setup` against the real Telegram and Claude services | ❌ tested with a mock Telegram server and scripted input only |
+| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI, enhancement (real ffmpeg), setup wizard (mock Telegram) | ✅ **406 automated tests** (`python -m pytest -q`) |
+| Enhancement looks good on your own media | ❌ not judged by eye: check the preview, try the other looks, or pick None |
 | Draft flow with the real Telegram service (edit-in-place cards, callback timing, albums) | ❌ tested only against fakes and real `Update` objects: expect small fixes on first use |
 | Instagram has no draft endpoint; containers expire in 24 h | ✅ official docs via search (no draft state found) |
 
@@ -70,23 +77,35 @@ cd social-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"                 # add ,capcut for the experimental draft export
 sudo apt install ffmpeg fonts-noto-cjk  # macOS: brew install ffmpeg   (fonts-noto-cjk = Chinese text)
-cp .env.example .env                    # then edit it: at minimum ANTHROPIC_API_KEY
-python -m socialagent selfcheck --claude
+python -m socialagent setup             # guided: checks your Claude key + Telegram bot, finds your Telegram id, writes .env
+python -m socialagent selfcheck --live  # read-only checks + one tiny Claude call + Telegram getMe
 python -m socialagent submit ~/Pictures/cafe.jpg -i "funny 中文, story only"          # creates a DRAFT and prints the card; posts nothing
 python -m pytest -q                     # optional: run the test-suite
 ```
 
-Edit `config/brand.yaml` (voice, content pillars, hashtags, posting times, Highlight collections). It is
-re-read on every submission, so changes apply immediately. You can also just tell Claude what to change.
+The wizard asks a few questions (time zone, account name, voice, default tone / language / look) and fills `config/brand.yaml`;
+edit that file any time (pillars, hashtags, posting times, Highlight collections). It is re-read on every submission, so
+changes apply immediately. You can also just tell Claude what to change.
+
+**What the wizard cannot do:** create the Telegram bot (only you can, in @BotFather, on your own account) or the Instagram/TikTok
+developer apps. Secrets are typed into your own terminal (hidden), checked live, written to `.env` (owner-only) and never printed
+or logged. Never paste keys into a chat, including with Claude.
 
 ---
 
 ## 3. Going live: setup guides
 
 ### 3.1 Telegram (how you talk to it)
-1. In Telegram, message **@BotFather** → `/newbot` → copy the token into `TELEGRAM_BOT_TOKEN`.
-2. Start the agent (`python -m socialagent run`), message your bot `/start`. It replies with **your user id**.
-3. Put that in `OWNER_TELEGRAM_ID` and restart. From then on the bot obeys only you.
+1. In Telegram, message **@BotFather** → `/newbot` → choose a name, then a username ending in `bot` → copy the token.
+   Optional hardening: send BotFather `/setjoingroups` and choose **Disable** so the bot cannot be added to groups.
+2. Run `python -m socialagent setup` (the Windows installer does this for you). Paste the token when asked (hidden); it is
+   checked with Telegram immediately.
+3. When the wizard says it is listening, open your bot on your phone and press **Start**. The wizard reads your Telegram id
+   from that message, asks you to confirm it is you, saves it as `OWNER_TELEGRAM_ID` and sends you a confirmation. From
+   then on the bot obeys only you.
+
+*Manual alternative:* put the token in `TELEGRAM_BOT_TOKEN`, start the agent, message the bot `/start`: while no owner is set
+it replies with your user id; put that in `OWNER_TELEGRAM_ID` and restart.
 
 ### 3.2 Hosting on an AWS Windows Server (step by step)
 The scheduler, the bot and the public media URLs need an always-on process with a **public HTTPS** address
@@ -110,14 +129,17 @@ gives a stable HTTPS address (needed for Instagram) and is required to verify th
    - **Git** (optional, for easy updates).
 4. **Get the code onto the server:** `git clone -b <branch> <your-repo-url> C:\apps\repo` (for a private repo use a
    read-only GitHub token; never paste tokens into chats), or zip the `social-agent` folder and copy it over RDP.
-5. **Configure.** In an **elevated PowerShell**: `cd C:\apps\repo\social-agent; .\deploy\windows\install.ps1`. First run creates
-   the virtual environment and a locked-down `.env` (only Administrators/SYSTEM can read it) and stops. Edit it
-   (`notepad .env`): set at least `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `TIMEZONE`,
-   `FFMPEG_BIN`, `HTTP_HOST=127.0.0.1`, `PUBLIC_BASE_URL=https://agent.yourdomain.com`, and a random `API_TOKEN`
-   (generate: `$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)`).
-   Notepad is fine: the agent also accepts UTF-8 with BOM and PowerShell's UTF-16.
-6. **Start it.** Run the script again: it runs `selfcheck`, then registers a start-at-boot task **SocialAgent** that restarts
-   itself if it crashes. It stays in dry-run until you set `DRY_RUN=false`.
+5. **Install and configure.** In an **elevated PowerShell** (run it interactively over RDP: it asks you questions):
+   `cd C:\apps\repo\social-agent; .\deploy\windows\install.ps1`. It creates the virtual environment and a locked-down
+   `.env` (only Administrators/SYSTEM can read it), then launches the **guided setup**: paste your Claude key and bot token
+   (hidden, each checked live), press Start on your bot from your phone so it learns your Telegram id, and answer a few
+   questions (time zone, account name, voice, default tone / language / look). It generates the `API_TOKEN` itself and keeps
+   `DRY_RUN=true`. Afterwards set the Windows-specific values it does not ask for in `.env` (`notepad .env`; Notepad is
+   fine, the agent also accepts UTF-8 with BOM and PowerShell's UTF-16): `FFMPEG_BIN=C:\ffmpeg\bin\ffmpeg.exe`,
+   `HTTP_HOST=127.0.0.1`, and `PUBLIC_BASE_URL=https://agent.yourdomain.com` once DNS and Caddy (step 7) are up.
+   Prefer to edit `.env` by hand? Run the script with `-SkipSetup`; use `-Reconfigure` to run the wizard again.
+6. **Start it.** The script (re-run it after editing `.env`) runs `selfcheck --live`, then registers a start-at-boot task
+   **SocialAgent** that restarts itself if it crashes. It stays in dry-run until you set `DRY_RUN=false`.
 7. **HTTPS.** Copy `deploy\windows\Caddyfile` to `C:\caddy\`, put your hostname in it, allow ports 80/443 in Windows
    Firewall, then register Caddy to start at boot:
    ```powershell
@@ -167,19 +189,21 @@ safety net for the first weeks. Until a platform's API credentials exist its met
 
 **The flow.** Share photos/videos to the bot (gallery → Share → Telegram → your bot, or attach in the chat). It answers at
 once, then **turns that same message into a draft card**: what it saw, a caption per place (IG post / IG Story / TikTok),
-hashtags and a suggested time. Buttons on the card:
+hashtags and a suggested time, **directly under the final photo/video as it will be posted** (long videos are previewed
+as a shorter, smaller clip; the published file is the full-quality master). Buttons on the card:
 
-- **Tone:** 😂 Funny · 📝 Describe · ✨ Aesthetic · 📖 Story · 💡 Tips · 🔥 Hype (add your own in `brand.yaml`)
+- **Tone:** 16 of them, paged with ◀ ▶: 😂 Funny · 📝 Describe · ✨ Aesthetic · 📖 Story · 💡 Tips · 🔥 Hype · 💅 Sassy · 🥰 Wholesome · … (add or override your own in `brand.yaml`)
 - **Language:** EN · 简体 · 繁體 · EN+中
+- **Look:** ✨ Natural · 🌈 Vivid · ☀️ Bright · 🌙 Moody · ⛔ None (your original). Tapping re-renders only the media; **🔍 Compare** sends a before | after image.
 - **Where:** ☑ IG post / ☐ IG story / ☐ TikTok (everything the media can go to)
 - 🔄 Rewrite · ✏️ My caption (your exact words) · 💬 Change… (tell me what to change)
 - ✅ **Approve** (next free slot) · ⚡ **Now** (after the 2-minute undo window) · 🗑 Discard
 
-Changing tone or language only re-runs the text writer (it does not re-read your photos), so taps are quick. You can
+Changing tone or language only re-runs the text writer, and changing the look only re-renders the media; neither re-reads your photos with Claude, so taps are quick. You can
 also **reply to the card** with a change (“shorter, mention Sunday”), or start the reply with `=` to use your own caption.
 After Approve the card becomes a confirmation with ✖ Cancel buttons.
 
-**Type hints in the caption** to skip taps: `funny 中文`, `story only, travel highlight`, `post tonight at 8pm`,
+**Type hints in the caption** to skip taps: `funny 中文`, `moody`, `no edit`, `story only, travel highlight`, `post tonight at 8pm`,
 `TikTok only`, `bilingual`. No caption at all: the agent uses your defaults (`/settings`) and decides the rest.
 
 Albums and "photo, then a text a few seconds later" become one submission. For full quality send photos/videos as
@@ -202,7 +226,7 @@ curl -H "Authorization: Bearer $API_TOKEN" -F "file=@clip.mp4" -F "instruction=T
 (or set `TELEGRAM_API_BASE` to a local Bot API server, see `docker-compose.yml`).
 
 **Managing it with Claude Code:** `.claude/agents/social-media-manager.md` defines the manager agent, which drives
-the same CLI (`submit`, `drafts`, `draft <id> --tone funny --lang zh --approve`, `queue`, `trends`, `review`, `selfcheck`, …) and edits `brand.yaml` on your behalf.
+the same CLI (`submit`, `drafts`, `draft <id> --tone funny --lang zh --look vivid --approve`, `queue`, `trends`, `review`, `selfcheck --live`, `setup`, …) and edits `brand.yaml` on your behalf.
 
 ---
 
@@ -218,7 +242,7 @@ the same CLI (`submit`, `drafts`, `draft <id> --tone funny --lang zh --approve`,
 
 ## 6. Safety design
 
-DRY_RUN default · owner-only bot · **nothing is scheduled before you tap Approve** · a second confirming tap for risk
+DRY_RUN default · owner-only bot · **nothing is scheduled before you tap Approve, and what posts is the file you previewed** · a second confirming tap for risk
 flags (minors, other people, copyright, location, sensitive…) · undo window · atomic claim so a post can never publish twice ·
 **no automatic retry after an ambiguous failure** (could double-post) · crash recovery marks interrupted posts for review ·
 Claude only *proposes*, plain code validates what each API can publish · web/trend/inspiration text is treated as
@@ -237,6 +261,9 @@ untrusted data · secrets and data are git-ignored · official APIs only.
 | "live web search wasn't available" | Trends fall back to evergreen formats; enable web search for your Anthropic org |
 | `File is too big` in Telegram | §4 big-video options |
 | HEIC photo rejected | Send as JPEG/PNG (iOS: Shortcut → Convert Image) |
+| The preview looks too strong / too flat | Tap another look (Natural is the gentlest), or ⛔ None; set `EDIT_LEVEL=none` to turn polish off entirely |
+| Setup says “Another program is already reading this bot's messages” | Stop the running agent (`Stop-ScheduledTask SocialAgent`) and run setup again |
+| Setup does not see your message | Open *your* bot (the link it prints) and press Start; or type your numeric id when it asks (get it from @userinfobot) |
 
 ## 8. Cost and privacy
 Each submission sends your media (downsized) and context to the Claude API; rough guess 5-15 US cents on the default
@@ -245,6 +272,6 @@ Trend research runs once a day. Nothing else leaves your machine except what you
 
 ## 9. Layout
 `src/socialagent/`: `drafts.py` (draft lifecycle + cards) · `brain.py` (Understander, Writer, guardrails) · `styles.py`
-(tone × language) · `prefs.py` · `cards.py` · `llm.py` (Claude wrapper) · `trends.py` · `media.py` (ffmpeg) · `feed.py`
+(tone × language) · `enhance.py` (light polish + previews) · `setup.py` (guided setup) · `prefs.py` · `cards.py` · `llm.py` (Claude wrapper) · `trends.py` · `media.py` (ffmpeg) · `feed.py`
 (slots, balance, Highlights) · `pipeline.py` (schedule, publish, retry, recover) · `scheduler.py` · `publishers/`
 (instagram, tiktok, manual, dry-run) · `channels/` (telegram, http) · `capcut.py` · `cli.py` · `tests/` · `docs/ARCHITECTURE.md`.
