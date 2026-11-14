@@ -71,6 +71,8 @@ class Script:
     def ask(self, prompt, default=""):
         self.out.append(prompt)
         self.asked.append(prompt)
+        if len(self.asked) > 300:                    # a wizard stuck re-asking the same question must fail, not spin
+            raise AssertionError(f"wizard is looping on: {prompt}")
         if self.interrupt_on and self.interrupt_on in prompt:
             raise EOFError
         for key, ans in self.rules:
@@ -114,6 +116,7 @@ def paths(tmp_path):
 
 def run(script, paths, tg, check_claude=claude_ok, **kw):
     env, example, brand = paths
+    kw.setdefault("port_busy", lambda port: False)          # real socket probing is tested separately
     return su.run_setup(script.io, env_path=env, brand_path=brand, example_path=example, http=tg.client(),
                         check_claude=check_claude, sleep=lambda s: None, now=ticker(), **kw)
 
@@ -470,3 +473,103 @@ def test_write_private_creates_owner_only_files_even_under_a_permissive_umask(tm
         assert stat.S_IMODE(f.stat().st_mode) == 0o600 and f.read_text() == "A=2\n"
     finally:
         os.umask(old)
+
+
+# ---------------------------------------------------------------- local port (other apps share the server)
+def _listener():
+    import socket
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    return srv, srv.getsockname()[1]
+
+
+def _free_port():
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_port_in_use_sees_a_real_listener_and_a_free_port():
+    srv, port = _listener()
+    try:
+        assert su.port_in_use(port) is True
+    finally:
+        srv.close()
+    assert su.port_in_use(_free_port()) is False
+
+
+def test_pick_free_port_skips_busy_and_avoided_ports_and_gives_up_eventually():
+    busy = {8787, 8788, 8790}
+    assert su.pick_free_port(8787, avoid=[8789], in_use=lambda p: p in busy) == 8791
+    assert su.pick_free_port(9000, in_use=lambda p: False) == 9000
+    with pytest.raises(su.SetupError, match="free port"):
+        su.pick_free_port(9000, attempts=5, in_use=lambda p: True)
+
+
+def test_wizard_picks_an_uncommon_free_port_and_binds_to_localhost_only(paths):
+    s = happy_script()
+    assert run(s, paths, FakeTelegram(updates=[msg(10)])) == 0
+    values: dict[str, str] = {}
+    load_dotenv(paths[0], values)
+    assert values["HTTP_PORT"] == "8787" and values["HTTP_PORT"] != "8080"          # not the template/common default
+    assert values["HTTP_HOST"] == "127.0.0.1"                                       # the template's 0.0.0.0 is replaced
+    assert "listens on 127.0.0.1:8787" in s.transcript and "http://localhost:8787" in s.transcript
+
+
+def test_wizard_suggests_the_next_free_port_when_the_default_is_taken(paths):
+    s = happy_script()
+    assert run(s, paths, FakeTelegram(updates=[msg(10)]), port_busy=lambda p: p in (8787, 8788)) == 0
+    values: dict[str, str] = {}
+    load_dotenv(paths[0], values)
+    assert values["HTTP_PORT"] == "8789"
+
+
+def test_wizard_rejects_a_busy_or_invalid_port_the_owner_types(paths):
+    s = happy_script(extra=[("Local port", ["80", "abc", "9000", "9100"])])
+    assert run(s, paths, FakeTelegram(updates=[msg(10)]), port_busy=lambda p: p == 9000) == 0
+    values: dict[str, str] = {}
+    load_dotenv(paths[0], values)
+    assert values["HTTP_PORT"] == "9100"
+    assert s.transcript.count("Use a number between 1024 and 65535.") == 2          # "80" (privileged) and "abc"
+    assert "Port 9000 is already in use" in s.transcript
+
+
+def test_rerun_keeps_the_chosen_port_and_a_custom_host_but_replaces_an_old_open_host(paths):
+    run(happy_script(), paths, FakeTelegram(updates=[msg(10)]))
+    text = paths[0].read_text(encoding="utf-8").replace("HTTP_PORT=8787", "HTTP_PORT=9300")
+    paths[0].write_text(text, encoding="utf-8")
+    s = Script(rules=[("time zone", "")])
+    assert run(s, paths, FakeTelegram()) == 0
+    values: dict[str, str] = {}
+    load_dotenv(paths[0], values)
+    assert values["HTTP_PORT"] == "9300" and values["HTTP_HOST"] == "127.0.0.1"
+
+    paths[0].write_text(text.replace("HTTP_HOST=127.0.0.1", "HTTP_HOST=10.0.0.5"), encoding="utf-8")     # deliberate choice survives
+    assert run(Script(rules=[("time zone", "")]), paths, FakeTelegram()) == 0
+    load_dotenv(paths[0], (again := {}))
+    assert again["HTTP_HOST"] == "10.0.0.5"
+
+    paths[0].write_text(text.replace("HTTP_HOST=127.0.0.1", "HTTP_HOST=0.0.0.0"), encoding="utf-8")      # the old wide-open default does not
+    assert run(Script(rules=[("time zone", "")]), paths, FakeTelegram()) == 0
+    load_dotenv(paths[0], (third := {}))
+    assert third["HTTP_HOST"] == "127.0.0.1"
+
+
+def test_a_saved_port_that_is_now_taken_is_replaced_by_a_free_one(paths):
+    run(happy_script(), paths, FakeTelegram(updates=[msg(10)]))
+    paths[0].write_text(paths[0].read_text(encoding="utf-8").replace("HTTP_PORT=8787", "HTTP_PORT=9300"), encoding="utf-8")
+    assert run(Script(rules=[("time zone", "")]), paths, FakeTelegram(), port_busy=lambda p: p == 9300) == 0
+    values: dict[str, str] = {}
+    load_dotenv(paths[0], values)
+    assert values["HTTP_PORT"] == "8787"
+
+
+def test_the_template_default_8080_counts_as_never_chosen(paths):
+    paths[0].write_text(paths[1].read_text(encoding="utf-8"), encoding="utf-8")
+    s = happy_script(secrets=[CLAUDE_KEY, TOKEN])
+    assert run(s, paths, FakeTelegram(updates=[msg(10)])) == 0
+    values: dict[str, str] = {}
+    load_dotenv(paths[0], values)
+    assert values["HTTP_PORT"] == "8787"

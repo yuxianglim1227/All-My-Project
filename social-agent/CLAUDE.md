@@ -5,7 +5,7 @@ once (vision) → writes captions per tone × language (text) → the owner revi
 official APIs / TikTok inbox / manual hand-off. Read `docs/ARCHITECTURE.md` first, then `README.md`.
 
 ## Commands
-- Tests: `python -m pytest -q` (needs ffmpeg; 406 tests, no network, no API keys required)
+- Tests: `python -m pytest -q` (needs ffmpeg; 414 tests, no network, no API keys required)
 - Lint: `python -m pyflakes src tests`
 - CLI: `python -m socialagent --help`
 

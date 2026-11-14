@@ -60,7 +60,9 @@ Everything defaults to **DRY RUN**: until you switch it off, nothing is ever pos
 | Windows behaviour (UTF-8 BOM / UTF-16 / CRLF config files, non-UTF-8 ffmpeg output, `FFMPEG_BIN`, Windows font paths, denied symlinks, no POSIX signals, tokens kept out of logs) | ✅ each simulated and covered by tests on Linux · ❌ **never run on real Windows** |
 | `deploy/windows/install.ps1` (including the guided-setup step), the Caddy and scheduled-task steps, AWS security-group advice | ⚠️ written without a Windows machine: read the script before trusting it; `selfcheck --live` verifies the result |
 | `socialagent setup` against the real Telegram and Claude services | ❌ tested with a mock Telegram server and scripted input only |
-| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI, enhancement (real ffmpeg), setup wizard (mock Telegram) | ✅ **406 automated tests** (`python -m pytest -q`) |
+| Cloudflare Tunnel steps (Windows service install, Public Hostname tab, automatic DNS record, 100 MB request limit) | ⚠️ taken from Cloudflare documentation pages as returned by search; the docs site itself was not reachable from the build environment and the steps were never run |
+| Free-port detection in the wizard | ✅ tested against real sockets on Linux · ⚠️ Windows socket behaviour simulated by design (connect + bind probes), never run there |
+| All logic, safety rules, scheduling, publishers (against mock servers), channels, CLI, enhancement (real ffmpeg), setup wizard (mock Telegram) | ✅ **414 automated tests** (`python -m pytest -q`) |
 | Enhancement looks good on your own media | ❌ not judged by eye: check the preview, try the other looks, or pick None |
 | Draft flow with the real Telegram service (edit-in-place cards, callback timing, albums) | ❌ tested only against fakes and real `Update` objects: expect small fixes on first use |
 | Instagram has no draft endpoint; containers expire in 24 h | ✅ official docs via search (no draft state found) |
@@ -111,16 +113,18 @@ it replies with your user id; put that in `OWNER_TELEGRAM_ID` and restart.
 The scheduler, the bot and the public media URLs need an always-on process with a **public HTTPS** address
 (`PUBLIC_BASE_URL`): Instagram downloads your media from it. A Windows Server on AWS does the job; Docker is not needed.
 Telegram uses outbound polling, so the *only* thing that must be reachable from the internet is the HTTPS address.
-(On Linux or elsewhere: a VPS with Caddy, Fly.io/Railway/Render, or `docker compose up -d` also work.)
+(On Linux or elsewhere: a VPS with Caddy, Fly.io/Railway/Render, or `docker compose up -d` also work. With Docker keep
+`HTTP_HOST=0.0.0.0`, which the image sets: the wizard's `127.0.0.1` is for a native install.)
 
 **You need:** the running instance (Desktop Experience edition; 2 vCPU / 4 GB RAM is a sensible start, though I have not
 benchmarked it: ffmpeg encoding is the only heavy step), an **Elastic IP**, and a **domain name** (any registrar). A domain
 gives a stable HTTPS address (needed for Instagram) and is required to verify the media domain for TikTok photo posts.
 
 1. **AWS console.** Attach an Elastic IP (otherwise the public IP changes when the instance stops). Security group
-   inbound: TCP **80 and 443** from anywhere (certificate issuance needs 80), RDP **3389 only from your own IP**. Do
-   **not** open 8080.
-2. **DNS.** Create an `A` record `agent.yourdomain.com` → the Elastic IP.
+   inbound: RDP **3389 only from your own IP**. With a Cloudflare Tunnel (step 7A) that is all you need; only with Caddy
+   (7B) also open TCP **80 and 443** from anywhere (certificate issuance needs 80). Never open the agent's own port.
+2. **DNS.** With a Cloudflare Tunnel the hostname is created for you (step 7A). With Caddy: an `A` record
+   `agent.yourdomain.com` → the Elastic IP.
 3. **RDP in** and install (all official downloads; versions change, so take the current ones):
    - **Python 3.12** from python.org (tick *Add python.exe to PATH*, install for all users).
    - **ffmpeg**: `choco install ffmpeg` if you use Chocolatey, or unzip a Windows build to `C:\ffmpeg`. Then set
@@ -136,11 +140,34 @@ gives a stable HTTPS address (needed for Instagram) and is required to verify th
    questions (time zone, account name, voice, default tone / language / look). It generates the `API_TOKEN` itself and keeps
    `DRY_RUN=true`. Afterwards set the Windows-specific values it does not ask for in `.env` (`notepad .env`; Notepad is
    fine, the agent also accepts UTF-8 with BOM and PowerShell's UTF-16): `FFMPEG_BIN=C:\ffmpeg\bin\ffmpeg.exe`,
-   `HTTP_HOST=127.0.0.1`, and `PUBLIC_BASE_URL=https://agent.yourdomain.com` once DNS and Caddy (step 7) are up.
+   and, once your tunnel or Caddy (step 7) is up, check `PUBLIC_BASE_URL`. The wizard already sets `HTTP_HOST=127.0.0.1` and a free `HTTP_PORT`.
    Prefer to edit `.env` by hand? Run the script with `-SkipSetup`; use `-Reconfigure` to run the wizard again.
 6. **Start it.** The script (re-run it after editing `.env`) runs `selfcheck --live`, then registers a start-at-boot task
    **SocialAgent** that restarts itself if it crashes. It stays in dry-run until you set `DRY_RUN=false`.
-7. **HTTPS.** Copy `deploy\windows\Caddyfile` to `C:\caddy\`, put your hostname in it, allow ports 80/443 in Windows
+7. **Public HTTPS address** (only Instagram API posting, TikTok photo posts and big-video uploads need it; Telegram works
+   without it). Pick **one** of:
+
+   **A. Cloudflare Tunnel (recommended if your domain is on Cloudflare, or other apps already use ports 80/443 on this
+   server).** The server opens an *outbound* connection to Cloudflare, so you open **no inbound ports** and nothing
+   clashes with your other apps; Cloudflare provides the HTTPS. Adding a hostname does not change your other hostnames.
+   1. The agent listens on `127.0.0.1` on a free local port that the setup wizard picks and checks (default **8787**,
+      deliberately not 8080/3000/5000/8000). It prints the port at the end.
+   2. Cloudflare dashboard → **Zero Trust** → **Networks** → **Tunnels**. If a tunnel for your other apps already runs *on
+      this server*, open it → **Configure** → **Public Hostname** → add one. Otherwise **Create a tunnel** → *Cloudflared* →
+      name it → choose **Windows** → run the install command it shows in an elevated prompt on the server
+      (`cloudflared.exe service install <TOKEN>`). That token is a secret: don't paste it into a chat or commit it.
+   3. **Public Hostname:** subdomain of your choice (for example `social`), your domain, **Type HTTP**, **URL** `localhost:8787`
+      (use your port). Save.
+   4. Check the **DNS** tab: a proxied `CNAME` for that hostname pointing at `<tunnel-id>.cfargotunnel.com` should exist. Cloudflare
+      creates it when the zone's DNS is on Cloudflare; its docs are not consistent about when, so add it by hand if missing.
+   5. Put `PUBLIC_BASE_URL=https://social.yourdomain.com` in `.env` (the wizard asks for it).
+
+   *Limits and gotchas:* Cloudflare caps a request body at **100 MB on Free and Pro plans** (so an `/api/submit` upload
+   must be smaller; the Telegram route is unaffected). Cloudflare's bot protection may challenge the Instagram/TikTok
+   servers that download your media from `/m/…`: if publishing fails with "could not process the media", add a Cloudflare
+   security rule that skips challenges for that path (not verified: I could not test it).
+
+   **B. Caddy** (only if ports 80 and 443 are free on this server). Copy `deploy\windows\Caddyfile` to `C:\caddy\`, put your hostname in it, allow ports 80/443 in Windows
    Firewall, then register Caddy to start at boot:
    ```powershell
    $a = New-ScheduledTaskAction -Execute "C:\caddy\caddy.exe" -Argument "run --config C:\caddy\Caddyfile" -WorkingDirectory "C:\caddy"
@@ -149,7 +176,7 @@ gives a stable HTTPS address (needed for Instagram) and is required to verify th
    Register-ScheduledTask -TaskName Caddy -Action $a -Trigger $t -Settings $s -User SYSTEM -RunLevel Highest
    Start-ScheduledTask -TaskName Caddy
    ```
-8. **Check from your phone's browser:** `https://agent.yourdomain.com/healthz` must say `ok`. Then message your bot.
+8. **Check from your phone's browser:** `https://<your public hostname>/healthz` must say `ok` (the agent must be running). Then message your bot.
 
 **Day-to-day on the server**
 - Logs: `Get-Content C:\apps\repo\social-agent\data\agent.log -Tail 50 -Wait` (tokens are never written to it).

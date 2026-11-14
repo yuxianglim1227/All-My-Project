@@ -15,11 +15,12 @@ import json
 import os
 import re
 import secrets
+import socket
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 import httpx
 import yaml
@@ -33,6 +34,10 @@ TELEGRAM_API = "https://api.telegram.org"
 _TOKEN_SHAPE = re.compile(r"^\d+:[\w-]+$")  # 123456789:ABC-def_123 (as BotFather prints it)
 
 OK, REJECTED, UNVERIFIED = "ok", "rejected", "unverified"
+
+# Deliberately uncommon: 3000 / 5000 / 8000 / 8080 are what other apps on the same server usually take.
+LOCAL_PORT_DEFAULT = 8787
+TEMPLATE_PORT = "8080"  # the value in .env.example; a saved 8080 means "never chosen", not "chosen"
 
 
 class SetupError(RuntimeError):
@@ -134,6 +139,38 @@ def telegram_wait_for_owner(http: httpx.Client, token: str, io: IO, *, wait_seco
         if not updates:
             sleep(1)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Local port for the agent's web server (other apps may already be running on this machine)
+# ---------------------------------------------------------------------------
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """True if something already listens on this port (or the OS will not let us have it).
+
+    Two probes, because on Windows a plain bind() can succeed next to a listener on another address: first try to
+    connect (a listener answers), then try to bind (catches reserved or half-closed ports).
+    """
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        pass
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return True
+    return False
+
+
+def pick_free_port(preferred: int = LOCAL_PORT_DEFAULT, *, avoid: Iterable[int] = (), attempts: int = 100,
+                   in_use: Callable[[int], bool] = port_in_use) -> int:
+    """First port at or above `preferred` that is not in `avoid` and not in use."""
+    skip = set(avoid)
+    for port in range(preferred, min(preferred + attempts, 65536)):
+        if port not in skip and not in_use(port):
+            return port
+    raise SetupError(f"Couldn't find a free port from {preferred} upwards; free one up or set HTTP_PORT in .env yourself.")
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +276,8 @@ def _collect_secret(io: IO, *, saved: str, keep_prompt: str, ask_prompt: str, ch
 
 def run_setup(io: IO, *, env_path: Path, brand_path: Path, example_path: Path | None = None, http: httpx.Client | None = None,
               check_claude: Callable[[str], tuple[str, str]] = validate_claude_key,
-              sleep: Callable[[float], None] = time.sleep, now: Callable[[], float] = time.monotonic) -> int:
+              sleep: Callable[[float], None] = time.sleep, now: Callable[[], float] = time.monotonic,
+              port_busy: Callable[[int], bool] = port_in_use) -> int:
     http = http or httpx.Client(timeout=40)
     env_path, brand_path = Path(env_path), Path(brand_path)
     say = io.say
@@ -336,9 +374,27 @@ def run_setup(io: IO, *, env_path: Path, brand_path: Path, example_path: Path | 
         answers["look"] = _pick(io, "Default photo/video look", [*LOOKS, ORIGINAL], brand.default_look)
 
         # 5. Server bits -------------------------------------------------------------------------------------------
-        say("\n5/5  Server settings.")
+        say("\n5/5  Web address and port. Telegram works without any of this; Instagram API posting and big-video uploads need it.\n"
+            "     The agent's web server listens on this machine only. Your Cloudflare Tunnel (or Caddy/IIS/nginx) is what\n"
+            "     exposes it, so the port just has to be free and different from your other apps (README section 3.2).")
+        saved_port = existing.get("HTTP_PORT", "")
+        if saved_port.isdigit() and saved_port != TEMPLATE_PORT and not port_busy(int(saved_port)):
+            suggested = int(saved_port)
+        else:
+            suggested = pick_free_port(LOCAL_PORT_DEFAULT, in_use=port_busy)
+        while True:
+            port = io.ask("Local port for the agent's web server", str(suggested))
+            if not (port.isdigit() and 1024 <= int(port) <= 65535):
+                say("  Use a number between 1024 and 65535.")
+            elif port_busy(int(port)):
+                say(f"  Port {port} is already in use on this machine (is the agent itself running? stop it first). Pick another.")
+            else:
+                break
+        updates["HTTP_PORT"] = str(int(port))
+        host = existing.get("HTTP_HOST", "")
+        updates["HTTP_HOST"] = host if host not in ("", "0.0.0.0") else "127.0.0.1"   # local only: the tunnel/proxy is the way in
         current_url = existing.get("PUBLIC_BASE_URL", "")
-        url = io.ask("Public HTTPS address of this server (blank = later; only Instagram API posting needs it)",
+        url = io.ask("Public HTTPS address (e.g. https://social.yourdomain.com; blank = later)",
                      "" if (not current_url or "example.com" in current_url) else current_url)
         if url:
             updates["PUBLIC_BASE_URL"] = url.rstrip("/")
@@ -370,8 +426,10 @@ def run_setup(io: IO, *, env_path: Path, brand_path: Path, example_path: Path | 
           "  1. python -m socialagent selfcheck --live   (checks Claude, Telegram, ffmpeg, fonts)\n"
           "  2. python -m socialagent run                (start the agent; on Windows the installer makes it a background task)\n"
           "  3. On your phone, send the bot a photo.\n"
-        + ("     DRY_RUN is ON: drafts are made and the publish step is rehearsed, nothing is posted until you set DRY_RUN=false."
-           if dry else "     ⚠️ DRY_RUN is OFF in your .env: approved posts will really publish."))
+        + ("     DRY_RUN is ON: drafts are made and the publish step is rehearsed, nothing is posted until you set DRY_RUN=false.\n"
+           if dry else "     ⚠️ DRY_RUN is OFF in your .env: approved posts will really publish.\n")
+        + f"\nThe agent's web server listens on {updates['HTTP_HOST']}:{updates['HTTP_PORT']} (this machine only). "
+          f"Point your tunnel / reverse proxy at http://localhost:{updates['HTTP_PORT']}.")
     return 0
 
 

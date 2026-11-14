@@ -1,9 +1,11 @@
 # Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# Use this ONLY if ports 80 and 443 are free on this server. If other apps already use them, or your domain is on
+# Cloudflare, use a Cloudflare Tunnel instead (README section 3.2, step 7A): no inbound ports, no conflicts.
 # 1. Replace the hostname with yours; its DNS A record must point at the server's Elastic IP.
 # 2. Ports 80 and 443 must be open (AWS security group AND Windows Firewall) - certificate issuance needs them.
 # 3. In the agent's .env set  HTTP_HOST=127.0.0.1  and  PUBLIC_BASE_URL=https://agent.example.com
-#    so the agent is reachable ONLY through this proxy.
+#    so the agent is reachable ONLY through this proxy. Use your HTTP_PORT (setup picks a free one; default 8787) below.
 # Run:  caddy.exe run --config C:\caddy\Caddyfile     (README shows how to start it at boot)
 agent.example.com {
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8787   # = HTTP_PORT in .env
 }

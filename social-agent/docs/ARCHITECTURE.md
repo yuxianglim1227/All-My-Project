@@ -1,6 +1,6 @@
 # Architecture: Social Agent (Phase 1 = draft-first)
 
-Status: Phase 1 implemented and tested (406 automated tests; nothing run against the live Instagram / TikTok /
+Status: Phase 1 implemented and tested (414 automated tests; nothing run against the live Instagram / TikTok /
 Telegram / Claude services yet, see §11). Phase 2 is partly built (light enhancement); the rest of Phases 2 and 3 is design only.
 
 ## 1. What changed and why
@@ -147,7 +147,7 @@ flowchart TB
 | The "agent" logic (what to do with a submission) | Your server | Plain Python: state machine, guardrails, scheduler. It decides *when* to call Claude. |
 | The "brain" (looking at the media, writing captions, researching trends) | Anthropic's servers (Claude API) | Your server sends a request and gets text back; no model runs on your machine. Needs `ANTHROPIC_API_KEY`. |
 | Media polish and previews | Your server (ffmpeg) | Nothing is uploaded to a third-party editor. |
-| Publishing | Your server → Instagram / TikTok APIs, or the manual hand-off | Instagram's API downloads media from your server, so that path needs a public HTTPS address. |
+| Publishing | Your server → Instagram / TikTok APIs, or the manual hand-off | Instagram's API downloads media from your server, so that path needs a public HTTPS address (a Cloudflare Tunnel or reverse proxy in front of the agent's local port). |
 | Claude Code (the tool used to build and maintain this) | Separate; not in the runtime path | It can drive the same CLI (`social-media-manager` sub-agent) to inspect or fix things; the agent keeps working when it is off. |
 
 If the server is off, the bot does not answer (Telegram keeps your messages for ~24 h and delivers them when it is back
@@ -162,6 +162,7 @@ flagged for your review instead of re-sent.
 | Claude API key | **You** (console.anthropic.com) | Pasted into the wizard (hidden), checked live |
 | Install Python, venv, package, `.env` permissions, Scheduled Task | `deploy\windows\install.ps1` | Untested on a real Windows Server (written without one) |
 | Validate both keys, find your Telegram id, timezone, tone/language/look defaults, write `.env` + `brand.yaml` | `socialagent setup` (the installer launches it) | You message the bot once; it reads your id from that message and asks you to confirm. Secrets are never printed or logged; `.env` is owner-only |
+| Public HTTPS address (only Instagram API posting, TikTok photo posts, big uploads) | **You**, in your DNS/Cloudflare account | A **Cloudflare Tunnel** (outbound only: no inbound ports, no clash with other apps on the server) or Caddy. The wizard picks a free local port (default 8787) and binds to localhost, so the agent is reachable only through the tunnel/proxy |
 | Instagram / TikTok API access (developer apps, tokens) | **You**, later, optional | Not needed to start: manual hand-off works without it |
 
 ## 5. The seamless flow (what happens when you share a photo)
@@ -308,7 +309,7 @@ trend/inspiration/OCR text treated as untrusted · tokens never logged · secret
 
 | Claim | Status |
 |---|---|
-| Logic, state machines, guardrails, publishers (vs. mock servers), Telegram handlers (vs. fake updates + real `Update` objects), CLI, HTTP | ✅ 406 automated tests |
+| Logic, state machines, guardrails, publishers (vs. mock servers), Telegram handlers (vs. fake updates + real `Update` objects), CLI, HTTP | ✅ 414 automated tests |
 | Instagram has no draft endpoint; containers expire in 24 h | ✅ official docs via search (no draft state found) |
 | TikTok inbox upload = real in-app draft | ✅ documented; audit exemption ⚠️ unconfirmed |
 | Telegram 20 MB limit; WhatsApp 3 buttons; Web Share Target Android-only | ✅ |
