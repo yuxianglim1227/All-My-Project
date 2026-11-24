@@ -5,14 +5,17 @@ once (vision) → writes captions per tone × language (text) → the owner revi
 official APIs / TikTok inbox / manual hand-off. Read `docs/ARCHITECTURE.md` first, then `README.md`.
 
 ## Commands
-- Tests: `python -m pytest -q` (needs ffmpeg; 458 tests, no network, no API keys required)
+- Tests: `python -m pytest -q` (needs ffmpeg; 465 tests, no network, no API keys required)
 - Lint: `python -m pyflakes src tests`
 - CLI: `python -m socialagent --help`
 
 ## Invariants (covered by tests; do not weaken)
 - `DRY_RUN` defaults to **true**; a missing credential falls back to a dry-run publisher, never a half-post.
 - Claude only *proposes*; `brain.validate_plan` / `eligible_targets` enforce what each platform can publish.
-- **Only `DraftService.approve` creates posts**: the publish engine never sees an unapproved draft. Risk flags need a 2nd tap.
+- **Only an explicit owner action creates posts** (`DraftService.approve` or the studio's `Composer.schedule`, both via
+  `Pipeline.schedule_targets`): the publish engine never sees an unapproved draft. Risk flags need a 2nd tap.
+- Studio: the composer publishes the cached master for (asset, look) that its preview was made from; reschedule/caption edits
+  only touch posts still `scheduled` (atomic `WHERE status='scheduled'`, so they never race the publisher's claim).
 - Changing tone/language re-runs only the text-only Writer (never the vision call). Channels hold a draft card by `card_ref`
   and edit it in place; persist that handle (a past bug sent a second message instead).
 - Media edits are **global light/colour polish only** (`EDIT_LEVEL=enhance` default; `none` = originals): no face/skin retouching,

@@ -26,6 +26,7 @@ from .aitasks import public_view as task_view
 from .assets import AssetError, AssetLibrary
 from .assets import public_view as asset_view
 from .auth import COOKIE, Auth, AuthError
+from .composer import ComposeError, Composer
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ def client_key(request: web.Request) -> str:
 
 
 def setup_studio(web_app: web.Application, *, auth: Auth, assets: AssetLibrary, tasks: AITasks, config: Callable[[], dict],
+                 composer: Composer | None = None,
                  secure_cookie: bool, max_upload_mb: int, incoming: Path) -> None:
     state = {"auth": auth, "assets": assets, "tasks": tasks}
     web_app[STUDIO_KEY] = state
@@ -274,6 +276,82 @@ def setup_studio(web_app: web.Application, *, auth: Auth, assets: AssetLibrary, 
     r.add_post(f"{API}/tasks/{{tid}}/run", run_task)
     r.add_delete(f"{API}/tasks/{{tid}}", delete_task)
 
+    if composer is None:
+        return
+
+    # ---- composer ------------------------------------------------------------------------------------
+    async def compose_options(request: web.Request) -> web.StreamResponse:
+        body = await _body(request)
+        try:
+            return _json(await asyncio.to_thread(composer.options, list(body.get("asset_ids") or [])))
+        except ComposeError as exc:
+            return _json({"error": str(exc)}, status=400)
+
+    async def preview(request: web.Request) -> web.StreamResponse:
+        try:
+            path = await asyncio.to_thread(composer.preview, request.match_info["aid"], request.query.get("look", "natural"))
+        except ComposeError as exc:
+            return _json({"error": str(exc)}, status=404)
+        except Exception as exc:  # ffmpeg failure: say so, never a stack trace
+            log.warning("Preview failed: %s", exc)
+            return _json({"error": "Couldn't render that look."}, status=500)
+        return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+    async def compose(request: web.Request) -> web.StreamResponse:
+        body = await _body(request)
+        try:
+            result = await asyncio.to_thread(composer.schedule, list(body.get("asset_ids") or []),
+                                             list(body.get("targets") or []), look=str(body.get("look") or "natural"))
+        except ComposeError as exc:
+            return _json({"error": str(exc)}, status=400)
+        return _json(result, status=201)
+
+    r.add_post(f"{API}/compose/options", compose_options)
+    r.add_post(f"{API}/compose", compose)
+    r.add_get(f"{API}/assets/{{aid}}/preview", preview)
+
+    # ---- calendar ------------------------------------------------------------------------------------
+    async def list_posts(request: web.Request) -> web.StreamResponse:
+        from datetime import datetime, timedelta
+        zone = composer.pipeline.zone
+        try:
+            start = datetime.fromisoformat(request.query["from"]).replace(tzinfo=zone)
+            end = datetime.fromisoformat(request.query["to"]).replace(tzinfo=zone) + timedelta(days=1)
+            return _json({"items": composer.posts(start, end), "timezone": composer.settings.timezone})
+        except (KeyError, ValueError) as exc:
+            return _json({"error": f"Give from/to as YYYY-MM-DD ({exc})."}, status=400)
+
+    async def patch_post(request: web.Request) -> web.StreamResponse:
+        body, pid = await _body(request), request.match_info["pid"]
+        try:
+            view = None
+            if body.get("when"):
+                view = composer.reschedule(pid, str(body["when"]))
+            if "caption" in body:
+                view = composer.edit_caption(pid, str(body["caption"]))
+            if view is None:
+                return _json({"error": "Nothing to change."}, status=400)
+            return _json(view)
+        except ComposeError as exc:
+            return _json({"error": str(exc)}, status=409)
+
+    async def post_action(request: web.Request) -> web.StreamResponse:
+        pid, action = request.match_info["pid"], request.match_info["action"]
+        fn = {"cancel": composer.pipeline.cancel, "retry": composer.pipeline.retry, "posted": composer.pipeline.confirm_posted}[action]
+        ok = await asyncio.to_thread(fn, pid)
+        return _json({"ok": ok} if ok else {"error": f"Can't {action} this post in its current state."}, status=200 if ok else 409)
+
+    async def post_file(request: web.Request) -> web.StreamResponse:
+        p = composer.media_file(request.match_info["pid"], _int(request.match_info["n"], -1))
+        if p is None:
+            raise web.HTTPNotFound()
+        return web.FileResponse(p, headers={"Content-Disposition": f'attachment; filename="{safe_filename(p.name)}"'})
+
+    r.add_get(f"{API}/posts", list_posts)
+    r.add_patch(f"{API}/posts/{{pid}}", patch_post)
+    r.add_post(f"{API}/posts/{{pid}}/{{action:cancel|retry|posted}}", post_action)
+    r.add_get(f"{API}/posts/{{pid}}/files/{{n:\\d+}}", post_file)
+
 
 # ---- helpers ------------------------------------------------------------------------------------------
 def _json(data: Any, status: int = 200) -> web.Response:
@@ -311,7 +389,7 @@ def studio_config(app: Any, gemini_ready: Callable[[], bool]) -> Callable[[], di
                 "platforms": [{"key": k, "label": v} for k, v in PLATFORMS.items()],
                 "defaults": {"tone": app.brand.default_tone, "language": app.brand.default_language},
                 "ai": {"gemini": gemini_ready(), "model": app.settings.gemini_model if gemini_ready() else ""},
-                "dry_run": app.settings.dry_run}
+                "dry_run": app.settings.dry_run, "timezone": app.settings.timezone}
     return build
 
 

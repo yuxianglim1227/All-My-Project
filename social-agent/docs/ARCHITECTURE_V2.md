@@ -254,8 +254,9 @@ the Telegram bot as an optional input. Replaced: `llm.py` (Claude) → `AIProvid
 
 | Milestone | Contents | Done when |
 |---|---|---|
-| **Built** | M1 foundation + AI layer: login (scrypt password, optional 6-digit codes, sessions, rate limit, CSRF header, CSP), media library (upload, phone share target, thumbnails, folders, tags, notes), PWA shell, AI tasks (captions for selected media, idea plans) by copy-paste or Gemini, `selfcheck` lines, installer step | 458 automated tests; UI driven end-to-end in a phone-sized browser |
+| **Built** | M1 foundation + AI layer: login (scrypt password, optional 6-digit codes, sessions, rate limit, CSRF header, CSP), media library (upload, phone share target, thumbnails, folders, tags, notes), PWA shell, AI tasks (captions for selected media, idea plans) by copy-paste or Gemini, `selfcheck` lines, installer step | 458 automated tests at M1 (465 after M2); UI driven end-to-end in a phone-sized browser |
 | M1 Foundation | FastAPI app, auth, SQLite schema, media library, PWA shell, worker process, Windows service + tunnel setup | You can log in from your phone and upload |
+| **Built** | M2: composer (pick media → look with live preview of the exact file → targets with caption/hashtags/time → schedule through the tested pipeline), calendar (month grid, day list on phones, drag to another day, edit caption/time, cancel, retry, "I posted it", download hand-off files), "Schedule this" from AI captions and "Use this idea" from idea plans, `update.ps1` | Driven end-to-end in phone and desktop browsers |
 | M2 Calendar + composer | Calendar (drag/drop, tags, slots, recurring), composer with overrides and previews, Instagram + TikTok publishing (reused) | A post scheduled on the phone publishes unattended |
 | M3 Local AI | AIProvider + Ollama, AI writer, media understanding, agent chat, job queue | Captions and options generated on your hardware |
 | M4 Brand Kit + styles | Templates, looks, overlays, photo-to-Reel, subtitles, consistency check, grid planner | Every draft passes the check |

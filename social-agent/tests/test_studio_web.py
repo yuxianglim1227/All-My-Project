@@ -242,3 +242,43 @@ def test_studio_password_and_totp_commands(tmp_path, capsys):
     assert _studio_login(argparse.Namespace(cmd="studio-totp", action="on"), app, ask=ask) == 0
     assert app.auth.totp_enabled and printed["key"]
     assert _studio_login(argparse.Namespace(cmd="studio-totp", action="off"), app) == 0 and not app.auth.totp_enabled
+
+
+# ---------------------------------------------------------------- composer + calendar over HTTP
+@needs_ffmpeg
+async def test_compose_and_calendar_round_trip(rig, media_dir):
+    client, app = rig
+    assert (await client.post("/studio/api/compose/options", json={}, headers=H)).status == 401
+    await login(client)
+    up = await (await client.post("/studio/api/assets", data=upload_form(("p.jpg", (media_dir / "photo.jpg").read_bytes())),
+                                  headers=H)).json()
+    aid = up["saved"][0]["id"]
+    opts = await (await client.post("/studio/api/compose/options", json={"asset_ids": [aid]}, headers=H)).json()
+    assert "instagram:photo" in [t["key"] for t in opts["targets"]]
+    pv = await client.get(f"/studio/api/assets/{aid}/preview?look=bright")
+    assert pv.status == 200 and pv.headers["Content-Type"] == "image/jpeg"
+    assert (await client.get(f"/studio/api/assets/{aid}/preview?look=sepia")).status == 404
+
+    bad = await client.post("/studio/api/compose", json={"asset_ids": [aid], "targets": [{"key": "instagram:reel", "caption": "x"}]}, headers=H)
+    assert bad.status == 400
+    r = await client.post("/studio/api/compose", json={"asset_ids": [aid], "look": "bright", "targets": [
+        {"key": "instagram:photo", "caption": "Hello", "hashtags": ["coffee"], "when": "2030-01-02T10:00"}]}, headers=H)
+    created = await r.json()
+    assert r.status == 201 and created["posts"][0]["when"].startswith("2030-01-02T10:00")
+    pid = created["posts"][0]["id"]
+
+    cal = await (await client.get("/studio/api/posts?from=2030-01-01&to=2030-01-31")).json()
+    assert [p["id"] for p in cal["items"]] == [pid] and cal["items"][0]["status"] == "scheduled"
+    assert (await client.get("/studio/api/posts?from=junk&to=2030-01-31")).status == 400
+
+    r = await client.patch(f"/studio/api/posts/{pid}", json={"when": "2030-01-03T11:00", "caption": "Edited"}, headers=H)
+    body = await r.json()
+    assert r.status == 200 and body["publish_at"].startswith("2030-01-03T11:00") and body["caption"] == "Edited"
+    f = await client.get(f"/studio/api/posts/{pid}/files/0")
+    assert f.status == 200 and "attachment" in f.headers["Content-Disposition"]
+    assert (await client.get(f"/studio/api/posts/{pid}/files/7")).status == 404
+
+    assert (await client.post(f"/studio/api/posts/{pid}/posted", headers=H)).status == 409    # not handed off
+    assert (await client.post(f"/studio/api/posts/{pid}/cancel", headers=H)).status == 200
+    r = await client.patch(f"/studio/api/posts/{pid}", json={"when": "2030-01-04T11:00"}, headers=H)
+    assert r.status == 409

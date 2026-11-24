@@ -173,6 +173,21 @@ class Store:
         args += [iso(utcnow()), pid]
         self._exec(f"UPDATE posts SET {', '.join(sets)} WHERE id=?", args)
 
+    def reschedule_post(self, pid: str, when: datetime) -> bool:
+        """Move a post that has not started publishing. Atomic against the publisher's claim."""
+        cur = self._exec("UPDATE posts SET publish_at=?, updated_at=? WHERE id=? AND status='scheduled'",
+                         (iso(when), iso(utcnow()), pid))
+        return cur.rowcount == 1
+
+    def edit_scheduled_caption(self, pid: str, caption: str) -> bool:
+        cur = self._exec("UPDATE posts SET caption=?, updated_at=? WHERE id=? AND status='scheduled'",
+                         (caption, iso(utcnow()), pid))
+        return cur.rowcount == 1
+
+    def posts_between(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return [_decode_post(r) for r in self._rows(
+            "SELECT * FROM posts WHERE publish_at>=? AND publish_at<? ORDER BY publish_at ASC", (iso(start), iso(end)))]
+
     def cancel_post(self, pid: str) -> bool:
         cur = self._exec("UPDATE posts SET status='cancelled', updated_at=? WHERE id=? AND status='scheduled'",
                          (iso(utcnow()), pid))

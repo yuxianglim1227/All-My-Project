@@ -83,12 +83,54 @@ details summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
 
 .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; display: flex; justify-content: space-around;
   background: var(--card); border-top: 1px solid var(--line); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); }
-.tabs a, .tab-soon { flex: 1; text-align: center; padding: 10px 4px; border-radius: 10px; color: var(--muted); text-decoration: none; font-weight: 600; }
+.tabs a { flex: 1; text-align: center; padding: 10px 4px; border-radius: 10px; color: var(--muted); text-decoration: none; font-weight: 600; }
 .tabs a.active { color: var(--primary); background: var(--bg); }
-.tab-soon { opacity: .45; }
 
 dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--text);
   width: min(520px, calc(100vw - 24px)); padding: 16px; }
 dialog::backdrop { background: rgba(0,0,0,.45); }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 9;
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; max-width: calc(100vw - 32px); }
+
+.grow { flex: 1; }
+.small { font-size: .85rem; }
+.left { justify-content: flex-start; }
+.banner { display: flex; gap: 8px; align-items: center; justify-content: space-between; background: var(--warn-bg); color: var(--warn-text);
+  border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px; }
+.strip { display: flex; gap: 8px; overflow-x: auto; }
+.strip img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.chips button { min-height: 36px; padding: 6px 12px; background: var(--card); color: var(--text); border: 1px solid var(--line); }
+.chips button.on { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.preview { display: block; max-width: 100%; max-height: 420px; border-radius: 10px; background: var(--line); margin-top: 6px; }
+.target { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; display: grid; gap: 8px; }
+.target > label:first-child { display: flex; gap: 8px; align-items: center; font-size: 1rem; }
+.target > label:first-child input { width: auto; min-height: 0; }
+.target .fields { display: grid; gap: 8px; }
+.target.off .fields { display: none; }
+.counter { font-size: .8rem; color: var(--muted); text-align: right; }
+.counter.over { color: var(--danger); font-weight: 700; }
+
+.cal-weekdays, .calendar { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.cal-weekdays div { text-align: center; font-size: .8rem; color: var(--muted); font-weight: 600; }
+.day { min-height: 110px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px; display: grid;
+  align-content: start; gap: 4px; }
+.day.other { opacity: .45; }
+.day.today { border-color: var(--primary); }
+.day.drop { outline: 2px dashed var(--primary); }
+.day h3 { margin: 0; font-size: .8rem; color: var(--muted); }
+.post { display: grid; grid-template-columns: 28px 1fr; gap: 6px; align-items: center; text-align: left; padding: 4px; min-height: 0;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; font-weight: 400; font-size: .75rem; width: 100%; }
+.post img { width: 28px; height: 28px; object-fit: cover; border-radius: 6px; }
+.post .line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.post.st-published { border-left: 4px solid var(--ok); } .post.st-failed { border-left: 4px solid var(--danger); }
+.post.st-handed_off { border-left: 4px solid #e0a100; } .post.st-cancelled { opacity: .5; text-decoration: line-through; }
+.post.st-scheduled { border-left: 4px solid var(--primary); }
+@media (max-width: 720px) {
+  .cal-weekdays { display: none; }
+  .calendar { grid-template-columns: 1fr; }
+  .day { min-height: 0; }
+  .day.empty, .day.other { display: none; }
+  .post { font-size: .9rem; grid-template-columns: 44px 1fr; }
+  .post img { width: 44px; height: 44px; }
+}

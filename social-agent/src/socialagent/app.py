@@ -28,6 +28,7 @@ from .scheduler import Scheduler
 from .store import Store
 from .studio.aitasks import AITasks
 from .studio.assets import AssetLibrary
+from .studio.composer import Composer
 from .studio.auth import Auth
 from .styles import StyleCatalog
 from .trends import TrendResearcher
@@ -53,6 +54,7 @@ class App:
     assets: AssetLibrary | None = None
     tasks: AITasks | None = None
     gemini: GeminiLLM | None = None
+    composer: Composer | None = None
 
 
 def make_publishers(settings: Settings, tokens: TokenBook, http: httpx.Client) -> dict[str, Publisher]:
@@ -118,4 +120,5 @@ def build_app(settings: Settings, notifier: Notifier, *, llm: LLM | None = None,
     tasks = AITasks(store, assets, brand=lambda: brand, catalog=lambda: catalog,
                     trends=lambda: trends.trends_for_prompt(8), llm=lambda: gemini)
     return App(settings, brand, store, llm, host, tokens, trends, pipeline, drafts, prefs, scheduler, pubs,
-               auth=auth, assets=assets, tasks=tasks, gemini=gemini)
+               auth=auth, assets=assets, tasks=tasks, gemini=gemini,
+               composer=Composer(settings=settings, store=store, assets=assets, pipeline=pipeline, prefs=prefs))

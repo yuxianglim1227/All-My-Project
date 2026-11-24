@@ -102,5 +102,6 @@ def make_http_app(app: App) -> web.Application:
         setup_studio(web_app, auth=app.auth, assets=app.assets, tasks=app.tasks,
                      config=studio_config(app, lambda: app.gemini is not None),
                      secure_cookie=settings.public_base_url.startswith("https://"),
-                     max_upload_mb=settings.studio_max_upload_mb, incoming=settings.assets_dir / "_incoming")
+                     max_upload_mb=settings.studio_max_upload_mb, incoming=settings.assets_dir / "_incoming",
+                     composer=app.composer)
     return web_app

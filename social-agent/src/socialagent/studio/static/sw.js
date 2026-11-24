@@ -1,6 +1,6 @@
 // Caches only the app shell so the studio opens fast and installs as an app. API calls and media are never cached
 // (they are private and change), so nothing about your account is stored by the service worker.
-const CACHE = "studio-shell-v1";
+const CACHE = "studio-shell-v2";
 const SHELL = ["/studio/", "/studio/static/app.js", "/studio/static/styles.css", "/studio/static/icon-192.png",
   "/studio/manifest.webmanifest"];
 

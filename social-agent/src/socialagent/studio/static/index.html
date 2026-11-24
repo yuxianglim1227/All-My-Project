@@ -46,15 +46,49 @@
         <input id="search" type="search" placeholder="Search" aria-label="Search">
       </div>
       <p class="muted" id="upload-status" role="status"></p>
+      <div id="prefill-banner" class="banner hidden"><span id="prefill-text"></span>
+        <button id="prefill-clear" type="button" class="ghost">Dismiss</button></div>
       <div id="selection-bar" class="selection hidden">
         <span id="selection-count"></span>
-        <button id="sel-captions" type="button">✍️ Write captions</button>
+        <button id="sel-compose" type="button">📅 Compose</button>
+        <button id="sel-captions" type="button" class="ghost">✍️ AI captions</button>
         <button id="sel-edit" type="button" class="ghost">Edit</button>
         <button id="sel-delete" type="button" class="ghost danger">Delete</button>
         <button id="sel-clear" type="button" class="ghost">Clear</button>
       </div>
       <div id="grid" class="grid"></div>
       <p class="muted center" id="empty-library">No media yet. Upload photos or videos, share them from your phone, or send them to the Telegram bot.</p>
+    </section>
+
+    <!-- calendar -->
+    <section id="view-calendar" class="view hidden">
+      <div class="toolbar">
+        <button id="cal-prev" type="button" class="ghost" aria-label="Previous month">‹</button>
+        <strong id="cal-title" class="grow center"></strong>
+        <button id="cal-next" type="button" class="ghost" aria-label="Next month">›</button>
+        <button id="cal-today" type="button" class="ghost">Today</button>
+      </div>
+      <p class="muted" id="cal-hint">Times are in <span id="cal-tz"></span>. Tap a post to change it; on a computer you can also drag it to another day.</p>
+      <div id="cal-weekdays" class="cal-weekdays"></div>
+      <div id="calendar" class="calendar"></div>
+    </section>
+
+    <!-- composer -->
+    <section id="view-compose" class="view hidden">
+      <button class="ghost" id="back-to-library" type="button">← Library</button>
+      <div class="card stack">
+        <h2>Compose</h2>
+        <div id="compose-media" class="strip"></div>
+        <div>
+          <strong>Look</strong>
+          <div id="compose-looks" class="chips"></div>
+          <img id="compose-preview" class="preview" alt="Preview of the final media">
+          <p class="muted small">This is the exact file that will be posted (smaller for the screen).</p>
+        </div>
+        <div id="compose-targets" class="stack"></div>
+        <p class="error" id="compose-error" role="alert"></p>
+        <button id="compose-submit" type="button">📅 Schedule</button>
+      </div>
     </section>
 
     <!-- AI tasks -->
@@ -97,7 +131,7 @@
   <nav class="tabs" id="tabs">
     <a href="#library" data-tab="library">🖼 Library</a>
     <a href="#ai" data-tab="ai">✨ AI</a>
-    <span class="tab-soon" title="Next milestone">📅 Calendar</span>
+    <a href="#calendar" data-tab="calendar">📅 Calendar</a>
   </nav>
 
   <!-- dialogs -->
@@ -135,6 +169,25 @@
       <label>Tags (comma separated) <input id="edit-tags"></label>
       <label>Note for the AI <textarea id="edit-note" rows="3" placeholder="e.g. our new matcha latte, shot at the Bangsar shop"></textarea></label>
       <div class="row"><button value="cancel" class="ghost" type="submit">Cancel</button><button value="ok" type="submit">Save</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="post-dialog">
+    <form method="dialog" id="post-form" class="stack">
+      <h2 id="post-title"></h2>
+      <p class="muted" id="post-meta"></p>
+      <p class="error" id="post-error"></p>
+      <label id="post-when-row">When <input id="post-when" type="datetime-local"></label>
+      <label id="post-caption-row">Caption <textarea id="post-caption" rows="6"></textarea></label>
+      <div id="post-files" class="row left"></div>
+      <a id="post-link" class="hidden" target="_blank" rel="noopener">Open the live post ↗</a>
+      <div class="row">
+        <button value="close" class="ghost" type="submit">Close</button>
+        <button id="post-cancel" type="button" class="ghost danger">Cancel post</button>
+        <button id="post-retry" type="button" class="ghost">Retry</button>
+        <button id="post-posted" type="button" class="ghost">I posted it</button>
+        <button id="post-save" type="button">Save</button>
+      </div>
     </form>
   </dialog>
 

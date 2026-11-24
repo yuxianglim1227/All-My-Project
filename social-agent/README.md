@@ -34,9 +34,14 @@ Android "Share to Studio", folders, tags, notes for the AI), and **AI tasks** at
 | **Copy-paste (AI Bridge)** | Tap *Copy prompt*, paste into your Claude or Gemini app (attach the listed media), paste the reply back. The studio checks the reply and shows captions / an idea plan with copy buttons | Free with your existing app; a few pastes a week |
 | **Gemini free tier** | Set `GEMINI_API_KEY` (free key from Google AI Studio); tap *Run with Gemini* | Free but rate-limited (limits change); Google may use free-tier data to improve its products |
 
+**Compose and calendar:** select media → 📅 Compose → pick a look (the preview is the exact file that will post) → tick
+where it goes, write or paste captions, choose *next free slot*, *as soon as possible* or a time → Schedule. The 📅 Calendar
+shows everything by day (drag to another day on a computer; tap to change the time or caption, cancel, retry, mark a
+hand-off as posted, or download its files). AI caption results have **Schedule this**; idea plans have **Use this idea**.
+
 Set it up: `python -m socialagent studio-password` (and optionally `studio-totp on`), start the agent, open
-`https://<your hostname>/studio/` (or `http://127.0.0.1:8787/studio/` on the server). Calendar, composer and scheduling
-from the studio come in the next milestone.
+`https://<your hostname>/studio/` (or `http://127.0.0.1:8787/studio/` on the server). To update the server later:
+`.\deploy\windows\update.ps1` (git pull, install, restart, health check).
 
 ---
 
