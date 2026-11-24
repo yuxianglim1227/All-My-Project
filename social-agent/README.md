@@ -132,6 +132,24 @@ or logged. Never paste keys into a chat, including with Claude.
 it replies with your user id; put that in `OWNER_TELEGRAM_ID` and restart.
 
 ### 3.2 Hosting on an AWS Windows Server (step by step)
+
+**Deploy from your PC (the bbtracker way):** once the server has Python and ffmpeg (step 3 below) and accepts SSH from
+your PC, everything else is one command on your PC:
+
+```powershell
+git clone -b ccr-facea248-swf7oj https://github.com/yuxianglim1227/All-My-Project.git   # once
+cd All-My-Project\social-agent\deploy
+copy deploy.example.json deploy.local.json     # once: same host, user and key as bbtracker; pick remote_dir
+notepad deploy.local.json
+.\deploy.ps1                                   # every time you want the latest version live
+```
+
+`deploy.ps1` pulls the latest code from GitHub, packs only the files in git (your `.env`, `data\` and `.venv` are never
+copied or overwritten), copies the package with **scp**, unpacks it into `remote_dir` and then, on the server, runs the
+first install (setup questions appear in your window; registers the start-at-boot task and starts it) or an update
+(install + restart + health check). `deploy.local.json` is git-ignored. Not yet run against a real server.
+
+The manual route is below.
 The scheduler, the bot and the public media URLs need an always-on process with a **public HTTPS** address
 (`PUBLIC_BASE_URL`): Instagram downloads your media from it. A Windows Server on AWS does the job; Docker is not needed.
 Telegram uses outbound polling, so the *only* thing that must be reachable from the internet is the HTTPS address.

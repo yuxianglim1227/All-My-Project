@@ -1,0 +1,8 @@
+{
+  "host": "your-server-elastic-ip-or-hostname",
+  "user": "Administrator",
+  "key": "C:\\Users\\you\\.ssh\\your-aws-key.pem",
+  "port": 22,
+  "remote_dir": "C:\\apps\\social",
+  "branch": "ccr-facea248-swf7oj"
+}

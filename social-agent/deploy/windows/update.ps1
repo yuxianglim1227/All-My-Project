@@ -12,9 +12,10 @@
 
 .PARAMETER Branch    Git branch to deploy (default: the one currently checked out).
 .PARAMETER TaskName  Scheduled-task name (default SocialAgent).
+.PARAMETER NoGit     The code was copied in by deploy.ps1 (scp from your PC): skip the git pull.
 #>
 [CmdletBinding()]
-param([string]$Branch = "", [string]$TaskName = "SocialAgent")
+param([string]$Branch = "", [string]$TaskName = "SocialAgent", [switch]$NoGit)
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -22,13 +23,17 @@ Set-Location $root
 $venvPy = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) { throw "No virtual environment found: run .\deploy\windows\install.ps1 first." }
 
-if (-not $Branch) { $Branch = (git rev-parse --abbrev-ref HEAD).Trim() }
-Write-Host "Updating branch $Branch ..."
-git fetch origin $Branch
-if ($LASTEXITCODE -ne 0) { throw "git fetch failed (network or credentials)." }
-git checkout $Branch
-git pull --ff-only origin $Branch
-if ($LASTEXITCODE -ne 0) { throw "git pull could not fast-forward (local changes?). Nothing was restarted." }
+if ($NoGit) {
+    Write-Host "Code was copied here by deploy.ps1 (scp); skipping git."
+} else {
+    if (-not $Branch) { $Branch = (git rev-parse --abbrev-ref HEAD).Trim() }
+    Write-Host "Updating branch $Branch ..."
+    git fetch origin $Branch
+    if ($LASTEXITCODE -ne 0) { throw "git fetch failed (network or credentials)." }
+    git checkout $Branch
+    git pull --ff-only origin $Branch
+    if ($LASTEXITCODE -ne 0) { throw "git pull could not fast-forward (local changes?). Nothing was restarted." }
+}
 
 & $venvPy -m pip install -e $root
 if ($LASTEXITCODE -ne 0) { throw "pip install failed. Nothing was restarted." }

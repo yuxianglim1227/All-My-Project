@@ -31,3 +31,4 @@ social-agent/data/
 social-agent/.venv/
 .pytest_cache/
 *.egg-info/
+social-agent/deploy/deploy.local.json
