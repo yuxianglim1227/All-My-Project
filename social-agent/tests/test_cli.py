@@ -20,7 +20,8 @@ def env(tmp_path, monkeypatch):
     brand = tmp_path / "brand.yaml"
     shutil.copyfile(ROOT / "config" / "brand.yaml", brand)
     for k in list(os.environ):
-        if k.startswith(("IG_", "TIKTOK_", "TELEGRAM_", "OWNER_", "DRY_RUN", "API_TOKEN", "PUBLIC_BASE", "REQUIRE_", "ANTHROPIC")):
+        if k.startswith(("IG_", "TIKTOK_", "TELEGRAM_", "OWNER_", "DRY_RUN", "API_TOKEN", "PUBLIC_BASE", "REQUIRE_", "ANTHROPIC",
+                         "AI_PROVIDER", "GEMINI_")):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("BRAND_FILE", str(brand))
@@ -155,7 +156,8 @@ def test_selfcheck_live_reports_platform_failures_with_exit_1(env, monkeypatch, 
     assert "connected as @me" in out and "not passed TikTok's audit" in out
 
 
-def test_selfcheck_live_claude_ping(env, capsys):
+def test_selfcheck_live_claude_ping(env, monkeypatch, capsys):
+    monkeypatch.setenv("AI_PROVIDER", "claude")
     llm = FakeLLM()
     llm.text_result = "OK"
     assert run(["selfcheck", "--claude"], llm=llm) == 0

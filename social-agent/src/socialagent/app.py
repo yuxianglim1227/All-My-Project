@@ -14,7 +14,8 @@ from .brain import Understander, Writer
 from .config import BrandProfile, Settings
 from .drafts import DraftService
 from .hosting import MediaHost
-from .llm import LLM, ClaudeLLM
+from .gemini import GeminiLLM
+from .llm import LLM, ClaudeLLM, NoAutoLLM
 from .maintenance import make_tiktok_refresher, refresh_instagram, refresh_tiktok
 from .notify import Notifier
 from .pipeline import Pipeline
@@ -25,6 +26,9 @@ from .publishers.tiktok import TikTokPublisher
 from .publishers.tokens import TokenBook
 from .scheduler import Scheduler
 from .store import Store
+from .studio.aitasks import AITasks
+from .studio.assets import AssetLibrary
+from .studio.auth import Auth
 from .styles import StyleCatalog
 from .trends import TrendResearcher
 
@@ -45,6 +49,10 @@ class App:
     prefs: Prefs
     scheduler: Scheduler
     publishers: dict[str, Publisher]
+    auth: Auth | None = None
+    assets: AssetLibrary | None = None
+    tasks: AITasks | None = None
+    gemini: GeminiLLM | None = None
 
 
 def make_publishers(settings: Settings, tokens: TokenBook, http: httpx.Client) -> dict[str, Publisher]:
@@ -71,10 +79,17 @@ def build_app(settings: Settings, notifier: Notifier, *, llm: LLM | None = None,
     http = http or httpx.Client(timeout=60)
     store = Store(settings.db_path)
     brand = BrandProfile.load(settings.brand_file)
-    llm = llm or ClaudeLLM(settings.claude_model, settings.claude_effort, settings.claude_fallbacks)
-    # Looking at media needs the strongest vision model; writing captions is text-only and can use a cheaper one.
-    writer_llm = llm if not settings.writer_model or settings.writer_model == settings.claude_model else \
-        ClaudeLLM(settings.writer_model, settings.claude_effort, settings.claude_fallbacks)
+    gemini = GeminiLLM(settings.gemini_api_key, settings.gemini_model, base=settings.gemini_base,
+                       http=httpx.Client(timeout=120)) if settings.gemini_api_key else None
+    writer_llm: LLM
+    if llm is None and settings.ai_provider == "claude":
+        llm = ClaudeLLM(settings.claude_model, settings.claude_effort, settings.claude_fallbacks)
+        # Looking at media needs the strongest vision model; writing captions is text-only and can use a cheaper one.
+        writer_llm = llm if not settings.writer_model or settings.writer_model == settings.claude_model else \
+            ClaudeLLM(settings.writer_model, settings.claude_effort, settings.claude_fallbacks)
+    else:
+        llm = llm or gemini or NoAutoLLM()  # zero per-call cost: Gemini free tier if a key exists, else copy-paste only
+        writer_llm = llm
     tokens = TokenBook(store, settings)
     host = MediaHost(settings.public_dir, settings.public_base_url)
     trends = TrendResearcher(llm, store, brand)
@@ -98,4 +113,9 @@ def build_app(settings: Settings, notifier: Notifier, *, llm: LLM | None = None,
         pipeline=pipeline, trends=trends, store=store,
         refresh_instagram=partial(refresh_instagram, settings, tokens, http) if live and settings.ig_user_id else None,
         refresh_tiktok=partial(refresh_tiktok, settings, tokens, http) if live and settings.tiktok_client_key else None)
-    return App(settings, brand, store, llm, host, tokens, trends, pipeline, drafts, prefs, scheduler, pubs)
+    auth = Auth(store, session_days=settings.studio_session_days)
+    assets = AssetLibrary(store, settings.assets_dir)
+    tasks = AITasks(store, assets, brand=lambda: brand, catalog=lambda: catalog,
+                    trends=lambda: trends.trends_for_prompt(8), llm=lambda: gemini)
+    return App(settings, brand, store, llm, host, tokens, trends, pipeline, drafts, prefs, scheduler, pubs,
+               auth=auth, assets=assets, tasks=tasks, gemini=gemini)

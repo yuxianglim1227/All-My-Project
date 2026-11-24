@@ -23,6 +23,21 @@ are Phase 2). The full design, **where the agent lives**, the agent's job descri
 
 Everything defaults to **DRY RUN**: until you switch it off, nothing is ever posted.
 
+### New: Social Studio (web app, v2 in progress)
+
+A self-hosted web app you open on your phone or PC (and can install to the home screen), served by the same agent
+process. Design: **[docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md)**. Built so far: login, media library (upload,
+Android "Share to Studio", folders, tags, notes for the AI), and **AI tasks** at zero per-call cost:
+
+| AI route | How | Cost / limits |
+|---|---|---|
+| **Copy-paste (AI Bridge)** | Tap *Copy prompt*, paste into your Claude or Gemini app (attach the listed media), paste the reply back. The studio checks the reply and shows captions / an idea plan with copy buttons | Free with your existing app; a few pastes a week |
+| **Gemini free tier** | Set `GEMINI_API_KEY` (free key from Google AI Studio); tap *Run with Gemini* | Free but rate-limited (limits change); Google may use free-tier data to improve its products |
+
+Set it up: `python -m socialagent studio-password` (and optionally `studio-totp on`), start the agent, open
+`https://<your hostname>/studio/` (or `http://127.0.0.1:8787/studio/` on the server). Calendar, composer and scheduling
+from the studio come in the next milestone.
+
 ---
 
 ## 1. What it can and can't do (read this first)

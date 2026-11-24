@@ -9,7 +9,7 @@ import logging.handlers
 import shutil
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import httpx
 import yaml
@@ -55,7 +55,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup", help="guided first-time setup: checks your Claude key + Telegram bot, finds your Telegram id, writes .env and brand.yaml")
-    sub.add_parser("run", help="start Telegram bot + HTTP server + scheduler")
+    sub.add_parser("run", help="start the studio web app + Telegram bot + scheduler")
+    sp = sub.add_parser("studio-password", help="set (or change) the studio login password; logs every device out")
+    sp.add_argument("--revoke", action="store_true", help="only log every device out")
+    sp.add_argument("--if-missing", action="store_true", help="do nothing if a password is already set (used by the installer)")
+    st = sub.add_parser("studio-totp", help="turn 6-digit login codes (authenticator app) on or off")
+    st.add_argument("action", choices=["on", "off"])
     s = sub.add_parser("submit", help="create a DRAFT from files (like sending them to the bot); nothing posts until approved")
     s.add_argument("files", nargs="+")
     s.add_argument("-i", "--instruction", default="")
@@ -195,6 +200,8 @@ def _dispatch(args: argparse.Namespace, app: App, settings: Settings, http: http
         return _selfcheck(app, settings, args.claude, http)
     elif args.cmd == "auth":
         return _auth(args, app, settings, http)
+    elif args.cmd in ("studio-password", "studio-totp"):
+        return _studio_login(args, app)
     return 0
 
 
@@ -261,14 +268,31 @@ def _selfcheck(app: App, settings: Settings, live: bool, http: httpx.Client | No
     if app.pipeline.manual is not None:
         for line in app.pipeline.manual.selfcheck():
             add(True, line)
+    add(True if app.auth and app.auth.configured else None,
+        "studio login password set" + (" + 6-digit codes" if app.auth and app.auth.totp_enabled else "")
+        if app.auth and app.auth.configured else "studio password not set: run `socialagent studio-password`")
+    add(True, f"AI: {settings.ai_provider}" + (f" · Gemini free tier key present (model {settings.gemini_model})" if app.gemini
+              else " · no GEMINI_API_KEY: AI tasks use copy-paste only") + " · copy-paste bridge always available")
     notes = {"none": " (your originals, untouched)", "enhance": " (light polish: exposure, contrast, shadows/highlights, colour; pick a look per draft)",
              "fit": " (+ reframes to 9:16 / 4:5)", "creative": " (+ hook text)"}
     add(True, f"EDIT_LEVEL={settings.edit_level}{notes[settings.edit_level]}")
     if live:
-        try:
-            add(True, f"Claude replied: {app.llm.text(system='Reply with the single word OK.', content='ping', max_tokens=50)[:40]!r}")
-        except LLMError as exc:
-            add(False, f"Claude call failed: {exc}")
+        from .llm import NoAutoLLM
+        if not isinstance(app.llm, NoAutoLLM):  # copy-paste only: there is no automatic AI to ping
+            name = "Claude" if settings.ai_provider == "claude" else "AI"
+            try:
+                add(True, f"{name} replied: {app.llm.text(system='Reply with the single word OK.', content='ping', max_tokens=50)[:40]!r}")
+            except LLMError as exc:
+                add(False, f"{name} call failed: {exc}")
+        if app.gemini is not None:
+            try:
+                models = app.gemini.list_models()
+                ok = app.gemini.model in models or any(m.startswith(app.gemini.model) for m in models)
+                add(True if ok else None, f"Gemini key works; {len(models)} model(s) available"
+                    + ("" if ok else f" but '{app.gemini.model}' is not one of them: set GEMINI_MODEL, e.g. "
+                       + ", ".join(sorted(m for m in models if "flash" in m)[:5])))
+            except LLMError as exc:
+                add(False, f"Gemini: {exc}")
         if settings.telegram_token:
             from .setup import SetupError, telegram_get_me
             try:
@@ -277,6 +301,52 @@ def _selfcheck(app: App, settings: Settings, live: bool, http: httpx.Client | No
                 add(False, f"Telegram: {exc}")
     print("\n".join(lines))
     return 1 if bad else 0
+
+
+def _studio_login(args: argparse.Namespace, app: App, *, ask: Callable[[str], str] | None = None,
+                  secret: Callable[[str], str] | None = None) -> int:
+    """Interactive: the password is typed hidden into this terminal, never passed on the command line."""
+    import getpass
+    from .studio.auth import AuthError, new_totp_secret, totp_uri
+    auth = app.auth
+    secret = secret or getpass.getpass
+    ask = ask or input
+    if args.cmd == "studio-password":
+        if getattr(args, "if_missing", False) and auth.configured:
+            print("Studio password already set (use `socialagent studio-password` to change it).")
+            return 0
+        if args.revoke:
+            print(f"Logged out {auth.revoke_all()} device(s).")
+            return 0
+        for _ in range(3):
+            first = secret("New studio password (hidden): ")
+            if first != secret("Type it again: "):
+                print("They don't match. Try again.")
+                continue
+            try:
+                auth.set_password(first)
+            except AuthError as exc:
+                print(exc)
+                continue
+            print("✅ Password set. Every device was logged out. Open the studio and log in.")
+            return 0
+        return 1
+    if args.action == "off":
+        auth.disable_totp()
+        print("6-digit codes are off.")
+        return 0
+    key = new_totp_secret()
+    print("Add this to an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password…):\n"
+          f"  setup key: {key}\n  or link:   {totp_uri(key, app.brand.account_name or 'owner')}\n"
+          "Keep this window private; anyone with the key can generate your codes.")
+    for _ in range(3):
+        try:
+            auth.enable_totp(key, ask("Type the 6-digit code the app shows now: "))
+            print("✅ 6-digit codes are on. You'll be asked for one at every login.")
+            return 0
+        except AuthError as exc:
+            print(exc)
+    return 1
 
 
 def _auth(args: argparse.Namespace, app: App, settings: Settings, http: httpx.Client) -> int:

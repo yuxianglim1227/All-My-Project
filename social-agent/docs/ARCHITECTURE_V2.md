@@ -1,6 +1,6 @@
 # Social Studio v2: architecture and design (proposed)
 
-Status: **proposal; decisions recorded in §12**. Nothing in this document is built yet. It replaces the Telegram-first
+Status: **M1 (foundation) and the AI layer are built** (§11); decisions in §12. Nothing in this document is built yet. It replaces the Telegram-first
 design in [ARCHITECTURE.md](ARCHITECTURE.md); the reusable parts of that code base are listed in §10.
 
 Reference studied: [SamurAIGPT/postiz-cheap](https://github.com/SamurAIGPT/postiz-cheap) (Next.js 16, PostgreSQL/Prisma,
@@ -239,11 +239,11 @@ polish looks, reframe to 9:16 / 4:5, Ken-Burns photo-to-Reel, subtitle styles, t
 
 | Layer | Choice | Why |
 |---|---|---|
-| Backend | Python 3.12 + FastAPI, existing `socialagent` package as the core | Reuses the tested scheduler, publishers (Instagram, TikTok), polish engine, safety rules; runs natively on Windows |
+| Backend | Python 3.12 + aiohttp (already the agent's HTTP server), existing `socialagent` package as the core | Reuses the tested scheduler, publishers (Instagram, TikTok), polish engine, safety rules; one process, runs natively on Windows. Changed from FastAPI during M1: one fewer framework and no second server |
 | Worker | Same codebase, separate process | Publishing never depends on a browser being open |
-| Frontend | React + TypeScript (Vite) PWA, built to static files; FullCalendar for the calendar | Rich drag-and-drop composer/calendar; nothing Node-based runs on the server |
+| Frontend | Plain HTML + JavaScript modules, no build step; installable PWA | Nothing to compile on the Windows server or in CI; strict CSP (no inline script/style). Changed from React during M1; a calendar library may be vendored in M2 |
 | Database | SQLite (WAL), migrations | One owner; PostgreSQL optional later |
-| AI | Ollama (text + vision), whisper.cpp | Zero per-call cost |
+| AI | AI Bridge (copy-paste with your Claude/Gemini app) + Gemini API free tier; Claude API optional | Zero per-call cost on a 4 GB server (§12) |
 | Media | ffmpeg | Already used |
 
 Reused from v1 as-is or with small changes: `publishers/instagram.py`, `publishers/tiktok.py`, `pipeline.py` (atomic claim,
@@ -254,6 +254,7 @@ the Telegram bot as an optional input. Replaced: `llm.py` (Claude) → `AIProvid
 
 | Milestone | Contents | Done when |
 |---|---|---|
+| **Built** | M1 foundation + AI layer: login (scrypt password, optional 6-digit codes, sessions, rate limit, CSRF header, CSP), media library (upload, phone share target, thumbnails, folders, tags, notes), PWA shell, AI tasks (captions for selected media, idea plans) by copy-paste or Gemini, `selfcheck` lines, installer step | 458 automated tests; UI driven end-to-end in a phone-sized browser |
 | M1 Foundation | FastAPI app, auth, SQLite schema, media library, PWA shell, worker process, Windows service + tunnel setup | You can log in from your phone and upload |
 | M2 Calendar + composer | Calendar (drag/drop, tags, slots, recurring), composer with overrides and previews, Instagram + TikTok publishing (reused) | A post scheduled on the phone publishes unattended |
 | M3 Local AI | AIProvider + Ollama, AI writer, media understanding, agent chat, job queue | Captions and options generated on your hardware |

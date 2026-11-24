@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Studio">
+  <title>Social Studio</title>
+  <link rel="manifest" href="/studio/manifest.webmanifest">
+  <link rel="icon" href="/studio/static/icon-192.png">
+  <link rel="apple-touch-icon" href="/studio/static/icon-192.png">
+  <link rel="stylesheet" href="/studio/static/styles.css">
+  <script type="module" src="/studio/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <strong class="brand" id="brand">Social Studio</strong>
+    <span class="pill warn hidden" id="dryrun">DRY RUN</span>
+    <button class="ghost hidden" id="logout" type="button">Log out</button>
+  </header>
+
+  <main>
+    <!-- login -->
+    <section id="view-login" class="view hidden">
+      <form id="login-form" class="card narrow" autocomplete="on">
+        <h1>Log in</h1>
+        <p class="muted" id="login-hint"></p>
+        <label>Password <input id="login-password" type="password" autocomplete="current-password" required></label>
+        <label id="totp-row" class="hidden">6-digit code <input id="login-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="8"></label>
+        <button type="submit">Log in</button>
+        <p class="error" id="login-error" role="alert"></p>
+      </form>
+    </section>
+
+    <!-- media library -->
+    <section id="view-library" class="view hidden">
+      <div class="toolbar">
+        <label class="button" for="file-input">⬆ Upload</label>
+        <input id="file-input" type="file" accept="image/*,video/*" multiple class="hidden">
+        <select id="folder-filter" aria-label="Folder"></select>
+        <select id="kind-filter" aria-label="Type">
+          <option value="">All</option><option value="image">Photos</option><option value="video">Videos</option>
+        </select>
+        <input id="search" type="search" placeholder="Search" aria-label="Search">
+      </div>
+      <p class="muted" id="upload-status" role="status"></p>
+      <div id="selection-bar" class="selection hidden">
+        <span id="selection-count"></span>
+        <button id="sel-captions" type="button">✍️ Write captions</button>
+        <button id="sel-edit" type="button" class="ghost">Edit</button>
+        <button id="sel-delete" type="button" class="ghost danger">Delete</button>
+        <button id="sel-clear" type="button" class="ghost">Clear</button>
+      </div>
+      <div id="grid" class="grid"></div>
+      <p class="muted center" id="empty-library">No media yet. Upload photos or videos, share them from your phone, or send them to the Telegram bot.</p>
+    </section>
+
+    <!-- AI tasks -->
+    <section id="view-ai" class="view hidden">
+      <div class="toolbar">
+        <button id="new-ideas" type="button">💡 Plan ideas</button>
+        <span class="muted" id="ai-mode"></span>
+      </div>
+      <div id="task-list" class="list"></div>
+      <p class="muted center" id="empty-tasks">No AI tasks yet. Plan ideas here, or select media in the Library and tap “Write captions”.</p>
+    </section>
+
+    <!-- one AI task -->
+    <section id="view-task" class="view hidden">
+      <button class="ghost" id="back-to-ai" type="button">← AI tasks</button>
+      <div class="card">
+        <h2 id="task-title"></h2>
+        <p class="muted" id="task-meta"></p>
+        <p class="error" id="task-error" role="alert"></p>
+        <div id="task-actions" class="stack">
+          <button id="run-gemini" type="button" class="hidden">⚡ Run with Gemini (free tier)</button>
+          <details id="bridge" open>
+            <summary>Copy-paste with your Claude or Gemini app</summary>
+            <ol class="steps">
+              <li><button id="copy-prompt" type="button">📋 Copy prompt</button></li>
+              <li id="share-step" class="hidden"><button id="share-media" type="button" class="ghost">📎 Share the media to the chat app</button>
+                <span class="muted">(or attach them there in the listed order)</span></li>
+              <li>Paste into the Claude or Gemini app and send.</li>
+              <li>Copy the whole reply and paste it here:</li>
+            </ol>
+            <textarea id="reply" rows="8" placeholder="Paste the reply (JSON) here"></textarea>
+            <button id="submit-reply" type="button">✅ Use this reply</button>
+          </details>
+        </div>
+        <div id="task-result"></div>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabs" id="tabs">
+    <a href="#library" data-tab="library">🖼 Library</a>
+    <a href="#ai" data-tab="ai">✨ AI</a>
+    <span class="tab-soon" title="Next milestone">📅 Calendar</span>
+  </nav>
+
+  <!-- dialogs -->
+  <dialog id="ideas-dialog">
+    <form method="dialog" id="ideas-form" class="stack">
+      <h2>Plan ideas</h2>
+      <label>How many <input id="ideas-count" type="number" min="1" max="30" value="7"></label>
+      <label>For the next … days <input id="ideas-days" type="number" min="1" max="30" value="7"></label>
+      <fieldset><legend>Platforms</legend><div id="ideas-platforms" class="checks"></div></fieldset>
+      <label>Tone <select id="ideas-tone"></select></label>
+      <label>Language <select id="ideas-lang"></select></label>
+      <label>Focus (optional) <input id="ideas-focus" placeholder="e.g. new menu launch, school holidays"></label>
+      <div class="row"><button value="cancel" class="ghost" type="submit">Cancel</button><button value="ok" type="submit">Create</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="captions-dialog">
+    <form method="dialog" id="captions-form" class="stack">
+      <h2>Write captions</h2>
+      <p class="muted" id="captions-count"></p>
+      <fieldset><legend>Platforms</legend><div id="captions-platforms" class="checks"></div></fieldset>
+      <label>Tone <select id="captions-tone"></select></label>
+      <label>Language <select id="captions-lang"></select></label>
+      <label>Instruction (optional) <input id="captions-instruction" placeholder="e.g. mention Sunday brunch"></label>
+      <div class="row"><button value="cancel" class="ghost" type="submit">Cancel</button><button value="ok" type="submit">Create</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="edit-dialog">
+    <form method="dialog" id="edit-form" class="stack">
+      <h2>Edit</h2>
+      <label>Name <input id="edit-name"></label>
+      <label>Folder <input id="edit-folder" list="folder-list"></label>
+      <datalist id="folder-list"></datalist>
+      <label>Tags (comma separated) <input id="edit-tags"></label>
+      <label>Note for the AI <textarea id="edit-note" rows="3" placeholder="e.g. our new matcha latte, shot at the Bangsar shop"></textarea></label>
+      <div class="row"><button value="cancel" class="ghost" type="submit">Cancel</button><button value="ok" type="submit">Save</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

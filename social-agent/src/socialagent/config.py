@@ -127,6 +127,16 @@ class Settings:
     font_path: str = ""
     jianying_drafts_dir: str = ""
 
+    # AI provider: claude (paid API) | gemini (free tier, automatic) | bridge (copy-paste with your Claude/Gemini app)
+    ai_provider: str = "bridge"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-flash-latest"
+    gemini_base: str = "https://generativelanguage.googleapis.com/v1beta"
+
+    # studio (web app)
+    studio_max_upload_mb: int = 200
+    studio_session_days: int = 30
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         e = os.environ if env is None else env
@@ -137,6 +147,9 @@ class Settings:
         edit_level = _str(e.get("EDIT_LEVEL"), "enhance").lower()
         if edit_level not in {"none", "enhance", "fit", "creative"}:
             raise ValueError("EDIT_LEVEL must be none, enhance, fit or creative")
+        provider = _str(e.get("AI_PROVIDER"), "bridge").lower()
+        if provider not in {"claude", "gemini", "bridge"}:
+            raise ValueError("AI_PROVIDER must be claude, gemini or bridge")
         effort = _str(e.get("CLAUDE_EFFORT"), "medium").lower()
         if effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError("CLAUDE_EFFORT must be low|medium|high|xhigh|max")
@@ -174,6 +187,12 @@ class Settings:
             max_reel_seconds=_int(e.get("MAX_REEL_SECONDS"), 90),
             font_path=_str(e.get("FONT_PATH")),
             jianying_drafts_dir=_str(e.get("JIANYING_DRAFTS_DIR")),
+            ai_provider=provider,
+            gemini_api_key=_str(e.get("GEMINI_API_KEY")),
+            gemini_model=_str(e.get("GEMINI_MODEL"), "gemini-flash-latest"),
+            gemini_base=_str(e.get("GEMINI_API_BASE"), "https://generativelanguage.googleapis.com/v1beta").rstrip("/"),
+            studio_max_upload_mb=_int(e.get("STUDIO_MAX_UPLOAD_MB"), 200),
+            studio_session_days=_int(e.get("STUDIO_SESSION_DAYS"), 30),
         )
         tz(s.timezone)  # fail fast on a bad zone name
         return s
@@ -190,6 +209,10 @@ class Settings:
     @property
     def prepared_dir(self) -> Path:
         return self.data_dir / "prepared"
+
+    @property
+    def assets_dir(self) -> Path:
+        return self.data_dir / "assets"
 
     @property
     def public_dir(self) -> Path:

@@ -89,6 +89,12 @@ elseif (-not $configured) {
     exit 0
 }
 
+# --- studio login: the web app needs a password before it can be opened from your phone ---------------
+if (-not $SkipSetup) {
+    & $venvPy -m socialagent studio-password --if-missing
+    if ($LASTEXITCODE -ne 0) { Write-Host "No studio password was set. Run: .venv\Scripts\python.exe -m socialagent studio-password" -ForegroundColor Yellow }
+}
+
 # --- ffmpeg reminder ------------------------------------------------------------------------------
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and -not (Test-EnvValue "FFMPEG_BIN")) {
     Write-Host "ffmpeg was not found on PATH and FFMPEG_BIN is empty in .env - set it to the full path of ffmpeg.exe." -ForegroundColor Yellow

@@ -41,6 +41,22 @@ class LLM(Protocol):
     def research(self, *, system: str, prompt: str, max_searches: int = 8) -> tuple[str, list[str]]: ...
 
 
+class NoAutoLLM:
+    """Used when no automatic AI is configured (AI_PROVIDER=bridge without GEMINI_API_KEY): every call explains the options."""
+
+    MESSAGE = ("No automatic AI is set up. Open the studio -> AI tasks and use copy-paste with your Claude/Gemini app, "
+               "or set GEMINI_API_KEY (free tier) for automatic drafts.")
+
+    def json(self, **kw: Any) -> dict[str, Any]:
+        raise LLMError(self.MESSAGE)
+
+    def text(self, **kw: Any) -> str:
+        raise LLMError(self.MESSAGE)
+
+    def research(self, **kw: Any) -> tuple[str, list[str]]:
+        raise LLMError("live web search isn't available without the paid Claude provider")
+
+
 class ClaudeLLM:
     def __init__(self, model: str = "claude-opus-5-5", effort: str = "medium", fallbacks: bool = True,
                  client: Any = None):

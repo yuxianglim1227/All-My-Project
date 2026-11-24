@@ -5,7 +5,7 @@ once (vision) → writes captions per tone × language (text) → the owner revi
 official APIs / TikTok inbox / manual hand-off. Read `docs/ARCHITECTURE.md` first, then `README.md`.
 
 ## Commands
-- Tests: `python -m pytest -q` (needs ffmpeg; 414 tests, no network, no API keys required)
+- Tests: `python -m pytest -q` (needs ffmpeg; 458 tests, no network, no API keys required)
 - Lint: `python -m pyflakes src tests`
 - CLI: `python -m socialagent --help`
 
@@ -28,6 +28,13 @@ official APIs / TikTok inbox / manual hand-off. Read `docs/ARCHITECTURE.md` firs
 - No secrets in git: `.env` and `data/` are ignored. Request URLs carry tokens, so `httpx` logging stays at WARNING.
 - Secrets are never printed or logged by `setup.py` (hidden input, last-4 mask, URLs with tokens never in errors); `.env` is
   written owner-only (atomic on POSIX, in place on Windows so the ACL survives). The wizard never turns `DRY_RUN` off.
+- **Zero per-call cost by default:** `AI_PROVIDER=bridge`. Automatic AI only with `GEMINI_API_KEY` (free tier) or the
+  opt-in paid Claude provider. Never automate the Claude/Gemini consumer apps (terms); the bridge is copy-paste.
+- Every AI answer (Gemini or pasted) is parsed with `jsoncheck.extract_json` and validated against the task schema before
+  it is stored; invalid replies leave the task answerable and say what is wrong.
+- Studio security: every `/studio/api` route except `me`/`login` needs a session; non-GET calls also need `X-Studio: 1`;
+  sessions are stored as SHA-256 hashes; strict CSP (no inline script/style, so UI text is set with `textContent`);
+  media is served only to a logged-in session; API responses are `no-store`.
 - Runs on Windows Server too: config files are read via `config.read_text_robust` (BOM/UTF-16), subprocess output is
   decoded as UTF-8, ffmpeg is located via `FFMPEG_BIN`, and nothing may assume POSIX signals or symlinks.
 
