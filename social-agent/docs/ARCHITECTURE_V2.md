@@ -1,6 +1,6 @@
 # Social Studio v2: architecture and design (proposed)
 
-Status: **proposal, awaiting 4 decisions (§12)**. Nothing in this document is built yet. It replaces the Telegram-first
+Status: **proposal; decisions recorded in §12**. Nothing in this document is built yet. It replaces the Telegram-first
 design in [ARCHITECTURE.md](ARCHITECTURE.md); the reusable parts of that code base are listed in §10.
 
 Reference studied: [SamurAIGPT/postiz-cheap](https://github.com/SamurAIGPT/postiz-cheap) (Next.js 16, PostgreSQL/Prisma,
@@ -261,13 +261,28 @@ the Telegram bot as an optional input. Replaced: `llm.py` (Claude) → `AIProvid
 | M5 Content engine | Trend intake, idea board, rolling plan, Story sequences, shot lists, autonomy levels | A week fills itself with drafts for approval |
 | M6 More channels + analytics | YouTube, Facebook, Threads, LinkedIn, Pinterest; insights, growth chart, top posts | Per §5 reviews |
 
-## 12. Decisions needed before building
+## 12. Decisions (answered 2026-11-24)
 
-1. **Server size:** Windows Server version, vCPU, total RAM and how much the other two apps use. Decides whether AI runs
-   on the server or on a PC you own (§6.3).
-2. **AI back end:** local only / local + free cloud tier fallback / something else.
-3. **Channels for M2–M6:** which of Instagram, TikTok, YouTube, Facebook, Threads, LinkedIn, Pinterest (X costs money).
-4. **Telegram:** keep it as optional quick capture, or web app only.
+| Question | Answer | Consequence |
+|---|---|---|
+| Server size | 4 GB RAM or less | **No local AI on the server.** ffmpeg runs one job at a time at low priority; whisper.cpp only with its smallest model, if at all |
+| AI back end | "Send to Gemini or Claude desktop, copy-paste back" | **AI Bridge** (§12.1) as the main route, plus the Gemini API free tier as an optional automatic route |
+| Channels | Instagram, TikTok, YouTube Shorts | M6 shrinks to YouTube; Facebook/Threads/LinkedIn/Pinterest stay out of scope |
+| Telegram | Keep as quick capture | v1 bot kept as an input; drafts land in the web studio |
+
+### 12.1 AI Bridge (copy-paste with your Claude / Gemini app)
+
+The studio prepares each AI task as a **ready-to-paste prompt pack**: brand kit, tone, language, platform rules, trend
+notes, the exact reply format, and the media to attach. You tap **Copy prompt** (and **Share media** on the phone), paste
+it into the Claude or Gemini app you already pay for or use free, then copy the reply back into the studio. The studio
+checks the reply against the expected format, shows what is missing, and turns it into drafts, ideas or a 2-week plan.
+
+- **Batching keeps it to a few pastes a week:** one paste can return a whole week of ideas, or captions for 10 uploads.
+- **Zero per-call cost:** it uses the apps' normal chat, not their APIs.
+- **Not automated on purpose:** driving the Claude or Gemini apps with scripts (clicking/typing for you) breaks their
+  consumer terms and breaks whenever their UI changes, so the studio never does it. The automated zero-cost route is the
+  Gemini API free tier (official, rate-limited, data may be used by Google), off by default.
+- Vision works too: attach the photos/keyframes the pack lists; the reply format asks for per-item facts.
 
 ## 13. Verification status of this design
 
